@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_NAME="demo-assistant"
+APP_USER="demo-assistant"
+APP_DIR="/opt/${APP_NAME}"
+DATA_DIR="/var/lib/${APP_NAME}"
+ENV_DIR="/etc/${APP_NAME}"
+ENV_FILE="${ENV_DIR}/${APP_NAME}.env"
+SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
+SOURCE_JAR="/tmp/demo-0.0.1-SNAPSHOT-boot.jar"
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "ERROR: Run this installer as root."
+  exit 1
+fi
+
+if [[ ! -f "${SOURCE_JAR}" ]]; then
+  echo "ERROR: ${SOURCE_JAR} was not uploaded."
+  exit 1
+fi
+
+java_major_version() {
+  java -version 2>&1 | awk -F'[\".]' '/version/ {print $2; exit}'
+}
+
+install_java_from_package_manager() {
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y java-21-openjdk-headless || dnf install -y java-21-openjdk || return 1
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y java-21-openjdk-headless || yum install -y java-21-openjdk || return 1
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-21-jre-headless || return 1
+  else
+    return 1
+  fi
+}
+
+install_java_from_adoptium() {
+  local architecture archive_url temp_archive
+  case "$(uname -m)" in
+    x86_64|amd64) architecture="x64" ;;
+    aarch64|arm64) architecture="aarch64" ;;
+    *) echo "ERROR: Unsupported CPU architecture: $(uname -m)"; return 1 ;;
+  esac
+
+  if ! command -v curl >/dev/null 2>&1; then
+    if command -v dnf >/dev/null 2>&1; then dnf install -y curl tar gzip
+    elif command -v yum >/dev/null 2>&1; then yum install -y curl tar gzip
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar gzip
+    fi
+  fi
+
+  archive_url="https://api.adoptium.net/v3/binary/latest/21/ga/linux/${architecture}/jre/hotspot/normal/eclipse"
+  temp_archive="$(mktemp --suffix=.tar.gz)"
+  echo "Java 21 is unavailable from the OS repository. Downloading Eclipse Temurin Java 21..."
+  curl --fail --location --retry 3 --connect-timeout 15 --output "${temp_archive}" "${archive_url}"
+  rm -rf /opt/java-21
+  mkdir -p /opt/java-21
+  tar -xzf "${temp_archive}" --strip-components=1 -C /opt/java-21
+  rm -f "${temp_archive}"
+  ln -sfn /opt/java-21/bin/java /usr/local/bin/java
+}
+
+current_java_major=""
+if command -v java >/dev/null 2>&1; then
+  current_java_major="$(java_major_version || true)"
+fi
+
+if [[ ! "${current_java_major}" =~ ^[0-9]+$ ]] || (( current_java_major < 21 )); then
+  echo "A usable Java 21 runtime was not found. Installing it now..."
+  install_java_from_package_manager || install_java_from_adoptium
+fi
+
+current_java_major="$(java_major_version || true)"
+if [[ ! "${current_java_major}" =~ ^[0-9]+$ ]] || (( current_java_major < 21 )); then
+  echo "ERROR: Java 21 installation failed."
+  exit 1
+fi
+JAVA_BIN="$(readlink -f "$(command -v java)")"
+echo "Java is ready: $(${JAVA_BIN} -version 2>&1 | head -n 1)"
+
+if ! id "${APP_USER}" >/dev/null 2>&1; then
+  useradd --system --home-dir "${DATA_DIR}" --create-home --shell /sbin/nologin "${APP_USER}"
+fi
+
+install -d -o root -g root -m 0755 "${APP_DIR}"
+install -d -o "${APP_USER}" -g "${APP_USER}" -m 0700 "${DATA_DIR}" "${DATA_DIR}/.demo-ilink"
+install -d -o root -g "${APP_USER}" -m 0750 "${ENV_DIR}"
+install -o root -g root -m 0644 "${SOURCE_JAR}" "${APP_DIR}/${APP_NAME}.jar"
+
+echo
+echo "Enter the application settings. API Key input is hidden and is not saved in shell history."
+read -r -s -p "DASHSCOPE_API_KEY: " DASHSCOPE_API_KEY
+echo
+read -r -p "DASHSCOPE_BASE_URL [https://dashscope.aliyuncs.com/compatible-mode/v1/]: " DASHSCOPE_BASE_URL
+DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/}"
+read -r -p "QWEATHER_API_HOST (your dedicated API Host): " QWEATHER_API_HOST
+read -r -s -p "QWEATHER_API_KEY: " QWEATHER_API_KEY
+echo
+
+if [[ -z "${DASHSCOPE_API_KEY}" || -z "${DASHSCOPE_BASE_URL}" || -z "${QWEATHER_API_HOST}" || -z "${QWEATHER_API_KEY}" ]]; then
+  echo "ERROR: All four application settings are required."
+  exit 1
+fi
+
+QWEATHER_API_HOST="${QWEATHER_API_HOST%/}"
+if [[ "${QWEATHER_API_HOST}" != http://* && "${QWEATHER_API_HOST}" != https://* ]]; then
+  QWEATHER_API_HOST="https://${QWEATHER_API_HOST}"
+fi
+
+umask 0077
+{
+  printf 'DASHSCOPE_API_KEY=%s\n' "${DASHSCOPE_API_KEY}"
+  printf 'DASHSCOPE_BASE_URL=%s\n' "${DASHSCOPE_BASE_URL}"
+  printf 'QWEATHER_API_HOST=%s\n' "${QWEATHER_API_HOST}"
+  printf 'QWEATHER_API_KEY=%s\n' "${QWEATHER_API_KEY}"
+  printf 'ILINK_CREDENTIALS_FILE=%s\n' "${DATA_DIR}/.demo-ilink/credentials.json"
+} > "${ENV_FILE}"
+chown root:"${APP_USER}" "${ENV_FILE}"
+chmod 0640 "${ENV_FILE}"
+unset DASHSCOPE_API_KEY DASHSCOPE_BASE_URL QWEATHER_API_HOST QWEATHER_API_KEY
+
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=Demo WeChat iLink Assistant
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${APP_DIR}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${JAVA_BIN} -jar ${APP_DIR}/${APP_NAME}.jar --assistant.console-enabled=false --assistant.ilink-enabled=true --server.address=127.0.0.1 --server.port=8080
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${DATA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+chmod 0644 "${SERVICE_FILE}"
+systemctl daemon-reload
+systemctl enable "${APP_NAME}" >/dev/null
+systemctl restart "${APP_NAME}"
+
+echo
+echo "Deployment completed. The service is running in the background and enabled at boot."
+echo "Live logs follow. On first login, scan the QR code with WeChat."
+echo "After login succeeds, press Ctrl+C to leave the logs; the service will keep running."
+echo
+sleep 2
+systemctl --no-pager --full status "${APP_NAME}" || true
+echo
+journalctl -u "${APP_NAME}" -n 50 -f
