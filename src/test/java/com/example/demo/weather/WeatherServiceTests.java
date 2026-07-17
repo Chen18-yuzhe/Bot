@@ -9,6 +9,7 @@ import java.util.zip.GZIPOutputStream;
 
 import org.junit.jupiter.api.Test;
 
+import com.example.demo.ApplicationException;
 import tools.jackson.databind.ObjectMapper;
 
 class WeatherServiceTests {
@@ -17,7 +18,7 @@ class WeatherServiceTests {
 	void shouldGiveClearMessageWhenApiHostIsMissing() {
 		WeatherService service = new WeatherService("", "test-key", new ObjectMapper());
 
-		WeatherConfigurationException exception = assertThrows(WeatherConfigurationException.class,
+		ApplicationException exception = assertThrows(ApplicationException.class,
 				() -> service.getCurrentWeather("北京"));
 
 		assertEquals("请先配置环境变量 QWEATHER_API_HOST", exception.getMessage());
@@ -27,7 +28,7 @@ class WeatherServiceTests {
 	void shouldGiveClearMessageWhenApiKeyIsMissing() {
 		WeatherService service = new WeatherService("weather.example.com", "", new ObjectMapper());
 
-		WeatherConfigurationException exception = assertThrows(WeatherConfigurationException.class,
+		ApplicationException exception = assertThrows(ApplicationException.class,
 				() -> service.getCurrentWeather("北京"));
 
 		assertEquals("请先配置环境变量 QWEATHER_API_KEY", exception.getMessage());

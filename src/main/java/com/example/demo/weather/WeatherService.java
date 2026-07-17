@@ -16,8 +16,10 @@ import java.util.zip.GZIPInputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
+import com.example.demo.ApplicationException;
 import tools.jackson.databind.ObjectMapper;
 
 @Service
@@ -75,7 +77,7 @@ public class WeatherService {
 		Location location = lookupLocation(city);
 		ForecastApiResponse forecast = queryForecast(location.id());
 		if (forecast.daily() == null || forecast.daily().isEmpty()) {
-			throw new WeatherCallException("和风天气没有返回未来天气数据", null);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY, "和风天气没有返回未来天气数据");
 		}
 
 		List<DailyWeatherForecast> daily = forecast.daily().stream()
@@ -93,10 +95,11 @@ public class WeatherService {
 				+ "&range=cn&number=1&lang=zh");
 		CityLookupResponse response = readJson(sendGet(uri), CityLookupResponse.class);
 		if (!"200".equals(response.code())) {
-			throw new WeatherCallException("城市查询失败，和风天气状态码=" + response.code(), null);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"城市查询失败，和风天气状态码=" + response.code());
 		}
 		if (response.location() == null || response.location().isEmpty()) {
-			throw new WeatherNotFoundException("没有找到城市：" + city);
+			throw new ApplicationException(HttpStatus.NOT_FOUND, "没有找到城市：" + city);
 		}
 		return response.location().get(0);
 	}
@@ -105,7 +108,8 @@ public class WeatherService {
 		URI uri = URI.create(apiHost + "/v7/weather/now?location=" + locationId + "&lang=zh&unit=m");
 		WeatherApiResponse response = readJson(sendGet(uri), WeatherApiResponse.class);
 		if (!"200".equals(response.code()) || response.now() == null) {
-			throw new WeatherCallException("和风天气返回错误，状态码=" + response.code(), null);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"和风天气返回错误，状态码=" + response.code());
 		}
 		return response;
 	}
@@ -114,7 +118,8 @@ public class WeatherService {
 		URI uri = URI.create(apiHost + "/v7/weather/3d?location=" + locationId + "&lang=zh&unit=m");
 		ForecastApiResponse response = readJson(sendGet(uri), ForecastApiResponse.class);
 		if (!"200".equals(response.code())) {
-			throw new WeatherCallException("和风天气预报返回错误，状态码=" + response.code(), null);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"和风天气预报返回错误，状态码=" + response.code());
 		}
 		return response;
 	}
@@ -131,24 +136,24 @@ public class WeatherService {
 					HttpResponse.BodyHandlers.ofByteArray());
 			if (response.statusCode() < 200 || response.statusCode() >= 300) {
 				if (response.statusCode() == 403) {
-					throw new WeatherCallException(
-							"和风天气拒绝请求（HTTP 403）。请将 QWEATHER_API_HOST 改为控制台中的专属 API Host，并检查 API Key 权限、余额和安全限制",
-							null);
+					throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+							"和风天气拒绝请求（HTTP 403）。请将 QWEATHER_API_HOST 改为控制台中的专属 API Host，并检查 API Key 权限、余额和安全限制");
 				}
 				if (response.statusCode() == 401) {
-					throw new WeatherCallException(
-							"和风天气鉴权失败（HTTP 401）。请检查 QWEATHER_API_KEY 是否为 Web API 的有效凭据",
-							null);
+					throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+							"和风天气鉴权失败（HTTP 401）。请检查 QWEATHER_API_KEY 是否为 Web API 的有效凭据");
 				}
-				throw new WeatherCallException("和风天气请求失败，HTTP状态码=" + response.statusCode(), null);
+				throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+						"和风天气请求失败，HTTP状态码=" + response.statusCode());
 			}
 			String contentEncoding = response.headers().firstValue("Content-Encoding").orElse("");
 			return decodeResponseBody(response.body(), contentEncoding);
 		} catch (InterruptedException exception) {
 			Thread.currentThread().interrupt();
-			throw new WeatherCallException("天气查询被中断", exception);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY, "天气查询被中断", exception);
 		} catch (IOException exception) {
-			throw new WeatherCallException("无法连接和风天气，请检查网络和 API Host", exception);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"无法连接和风天气，请检查网络和 API Host", exception);
 		}
 	}
 
@@ -163,13 +168,15 @@ public class WeatherService {
 			return new String(body, StandardCharsets.UTF_8);
 		}
 		if (!gzipMagic) {
-			throw new WeatherCallException("和风天气响应声明为Gzip，但数据格式不正确", null);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"和风天气响应声明为Gzip，但数据格式不正确");
 		}
 
 		try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(body))) {
 			return new String(gzipInputStream.readAllBytes(), StandardCharsets.UTF_8);
 		} catch (IOException exception) {
-			throw new WeatherCallException("无法解压和风天气返回的Gzip数据", exception);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"无法解压和风天气返回的Gzip数据", exception);
 		}
 	}
 
@@ -177,16 +184,19 @@ public class WeatherService {
 		try {
 			return objectMapper.readValue(json, responseType);
 		} catch (Exception exception) {
-			throw new WeatherCallException("无法解析和风天气返回的数据", exception);
+			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
+					"无法解析和风天气返回的数据", exception);
 		}
 	}
 
 	private void validateConfiguration() {
 		if (apiHost.isBlank()) {
-			throw new WeatherConfigurationException("请先配置环境变量 QWEATHER_API_HOST");
+			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE,
+					"请先配置环境变量 QWEATHER_API_HOST");
 		}
 		if (apiKey == null || apiKey.isBlank()) {
-			throw new WeatherConfigurationException("请先配置环境变量 QWEATHER_API_KEY");
+			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE,
+					"请先配置环境变量 QWEATHER_API_KEY");
 		}
 	}
 
