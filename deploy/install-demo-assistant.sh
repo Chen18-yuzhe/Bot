@@ -134,7 +134,7 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${ENV_FILE}
-ExecStart=${JAVA_BIN} -jar ${APP_DIR}/${APP_NAME}.jar --assistant.console-enabled=false --assistant.ilink-enabled=true --server.address=127.0.0.1 --server.port=8080
+ExecStart=${JAVA_BIN} -jar ${APP_DIR}/${APP_NAME}.jar --assistant.ilink-enabled=true --server.address=127.0.0.1 --server.port=8080
 Restart=on-failure
 RestartSec=30
 TimeoutStopSec=30

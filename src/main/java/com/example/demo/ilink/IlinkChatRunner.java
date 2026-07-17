@@ -35,6 +35,7 @@ public class IlinkChatRunner {
 
 	private final AssistantService assistantService;
 	private final IlinkSessionStore sessionStore;
+	private final WechatCommandHandler commandHandler;
 	private final long minReplyDelayMs;
 	private final long maxReplyDelayMs;
 	private final int maxReplyChars;
@@ -50,11 +51,13 @@ public class IlinkChatRunner {
 	private volatile Thread worker;
 
 	public IlinkChatRunner(AssistantService assistantService, IlinkSessionStore sessionStore,
+			WechatCommandHandler commandHandler,
 			@Value("${assistant.ilink.min-reply-delay-ms:13000}") long minReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars) {
 		this.assistantService = assistantService;
 		this.sessionStore = sessionStore;
+		this.commandHandler = commandHandler;
 		this.minReplyDelayMs = Math.max(0, minReplyDelayMs);
 		this.maxReplyDelayMs = Math.max(this.minReplyDelayMs, maxReplyDelayMs);
 		this.maxReplyChars = Math.max(100, maxReplyChars);
@@ -195,12 +198,16 @@ public class IlinkChatRunner {
 		boolean typingStarted = startTyping(userId);
 		try {
 			String answer;
-			if (isResetCommand(question)) {
+			String commandReply = commandHandler.handle(question);
+			if (commandReply != null) {
+				answer = commandReply;
+			} else if (isResetCommand(question)) {
 				assistantService.clearConversation(userId);
 				answer = RESET_REPLY;
 			} else {
 				answer = assistantService.chat(userId, question);
 			}
+			answer = commandHandler.addWelcomeForFirstContact(userId, answer);
 			answer = safeReply(answer);
 			long remainingDelay = receivedAt + targetDelayMs - System.currentTimeMillis();
 			if (remainingDelay > 0) {
