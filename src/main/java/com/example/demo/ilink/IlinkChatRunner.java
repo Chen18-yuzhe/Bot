@@ -6,6 +6,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +42,10 @@ public class IlinkChatRunner {
 	private static final Logger log = LoggerFactory.getLogger(IlinkChatRunner.class);
 	private static final int MAX_SEEN_MESSAGE_IDS = 500;
 	private static final String RESET_REPLY = "已清除本次对话记忆，我们可以重新开始。";
+	private static final Pattern VISUAL_FOLLOW_UP = Pattern.compile(
+			"这张|这幅|这个画面|刚才(?:的|那张)?|上面(?:的|那张)?|前面(?:的|那张)?|上一张|这些图|两张图|"
+			+ "类似(?:的)?(?:图片|照片|图像)|同款|参考(?:这张|刚才|上面|前面|图片|照片|图)|"
+			+ "找不同|比较.{0,8}(?:图片|照片|图像|两张)|(?:图片|照片|图像).{0,8}(?:区别|不同)");
 
 	private final AssistantService assistantService;
 	private final IlinkSessionStore sessionStore;
@@ -44,6 +54,16 @@ public class IlinkChatRunner {
 	private final long maxReplyDelayMs;
 	private final int maxReplyChars;
 	private final long maxMediaBytes;
+	private final long mediaBatchWindowMs;
+	private final long recentMediaTtlMs;
+	private final ScheduledExecutorService batchExecutor = Executors.newScheduledThreadPool(1, runnable -> {
+		Thread thread = new Thread(runnable, "ilink-media-batch");
+		thread.setDaemon(true);
+		return thread;
+	});
+	private final Map<String, PendingBatch> pendingBatches = new ConcurrentHashMap<>();
+	private final Map<String, RecentMedia> recentMediaByUser = new ConcurrentHashMap<>();
+	private final Map<String, AtomicLong> userMessageVersions = new ConcurrentHashMap<>();
 	private final long acceptMessagesAfterMs = System.currentTimeMillis() - 5_000;
 	private final Map<Long, Boolean> seenMessageIds = new LinkedHashMap<>(128, 0.75f, true) {
 		@Override
@@ -60,7 +80,9 @@ public class IlinkChatRunner {
 			@Value("${assistant.ilink.min-reply-delay-ms:13000}") long minReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars,
-			@Value("${assistant.ilink.max-media-bytes:104857600}") long maxMediaBytes) {
+			@Value("${assistant.ilink.max-media-bytes:104857600}") long maxMediaBytes,
+			@Value("${assistant.ilink.batch-window-ms:4000}") long mediaBatchWindowMs,
+			@Value("${assistant.ilink.recent-media-ttl-seconds:45}") long recentMediaTtlSeconds) {
 		this.assistantService = assistantService;
 		this.sessionStore = sessionStore;
 		this.commandHandler = commandHandler;
@@ -68,6 +90,8 @@ public class IlinkChatRunner {
 		this.maxReplyDelayMs = Math.max(this.minReplyDelayMs, maxReplyDelayMs);
 		this.maxReplyChars = Math.max(100, maxReplyChars);
 		this.maxMediaBytes = Math.max(1_048_576, maxMediaBytes);
+		this.mediaBatchWindowMs = Math.max(1_000, Math.min(20_000, mediaBatchWindowMs));
+		this.recentMediaTtlMs = TimeUnit.SECONDS.toMillis(Math.max(10, Math.min(600, recentMediaTtlSeconds)));
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
@@ -77,6 +101,7 @@ public class IlinkChatRunner {
 
 	@PreDestroy
 	public void stop() {
+		batchExecutor.shutdownNow();
 		Thread currentWorker = worker;
 		if (currentWorker != null) {
 			currentWorker.interrupt();
@@ -169,9 +194,84 @@ public class IlinkChatRunner {
 			if ((text == null || text.isBlank()) && media.isEmpty()) {
 				continue;
 			}
-			handleQuestion(message.getFrom_user_id(), text == null ? "" : text.trim(), media);
-			saveSession();
+			queueQuestion(message.getFrom_user_id(), text == null ? "" : text.trim(), media);
 		}
+	}
+
+	private void queueQuestion(String userId, String question, List<MediaContent> media) {
+		long messageVersion = userMessageVersions.computeIfAbsent(userId, ignored -> new AtomicLong())
+				.incrementAndGet();
+		PendingBatch batch = pendingBatches.computeIfAbsent(userId, ignored -> new PendingBatch());
+		ScheduledFuture<?> previous;
+		int totalMedia;
+		boolean hasText;
+		synchronized (batch) {
+			if (!question.isBlank()) {
+				if (!batch.question.isBlank()) {
+					batch.question += "\n" + question;
+				} else {
+					batch.question = question;
+				}
+			}
+			batch.media.addAll(media);
+			batch.messageVersion = messageVersion;
+			totalMedia = batch.media.size();
+			hasText = !batch.question.isBlank();
+			if (!batch.media.isEmpty()) {
+				recentMediaByUser.put(userId,
+						new RecentMedia(List.copyOf(batch.media), System.currentTimeMillis()));
+			}
+			previous = batch.flushTask;
+			batch.flushTask = batchExecutor.schedule(() -> flushQuestion(userId, batch),
+					mediaBatchWindowMs, TimeUnit.MILLISECONDS);
+		}
+		if (previous != null) {
+			previous.cancel(false);
+		}
+		log.info("已暂存用户消息，等待 {} 毫秒收集同一轮文本和媒体：用户={}，本批媒体总数={}，已有文字={}",
+				mediaBatchWindowMs, userId, totalMedia, hasText);
+	}
+
+	private void flushQuestion(String userId, PendingBatch batch) {
+		String question;
+		List<MediaContent> media;
+		long messageVersion;
+		synchronized (batch) {
+			question = batch.question;
+			media = List.copyOf(batch.media);
+			messageVersion = batch.messageVersion;
+			pendingBatches.remove(userId, batch);
+		}
+		if (media.isEmpty() && isVisualFollowUp(question)) {
+			List<MediaContent> recentMedia = recentMedia(userId);
+			if (!recentMedia.isEmpty()) {
+				media = recentMedia;
+				log.info("文字消息引用了近期媒体，已自动合并：用户={}，媒体数量={}", userId, media.size());
+			}
+		}
+		try {
+			handleQuestion(userId, question, media, messageVersion);
+			saveSession();
+		} catch (InterruptedException exception) {
+			Thread.currentThread().interrupt();
+			log.warn("批量消息处理被中断：用户={}", userId);
+		}
+	}
+
+	private List<MediaContent> recentMedia(String userId) {
+		RecentMedia recent = recentMediaByUser.get(userId);
+		if (recent == null) {
+			return List.of();
+		}
+		if (System.currentTimeMillis() - recent.savedAtMs() > recentMediaTtlMs) {
+			recentMediaByUser.remove(userId, recent);
+			return List.of();
+		}
+		return recent.media();
+	}
+
+	private static boolean isVisualFollowUp(String question) {
+		return question != null && !question.isBlank() && VISUAL_FOLLOW_UP.matcher(question).find();
 	}
 
 	private boolean isNewUserMessage(WeixinMessage message) {
@@ -194,7 +294,8 @@ public class IlinkChatRunner {
 		return true;
 	}
 
-	private void handleQuestion(String userId, String question, List<MediaContent> media) throws InterruptedException {
+	private void handleQuestion(String userId, String question, List<MediaContent> media,
+			long messageVersion) throws InterruptedException {
 		long receivedAt = System.currentTimeMillis();
 		long targetDelayMs = randomDelayMs();
 		log.info("收到 iLink 消息：文本字符数={}，媒体数量={}", question.length(), media.size());
@@ -208,19 +309,32 @@ public class IlinkChatRunner {
 				answer = commandReply;
 			} else if (isResetCommand(question)) {
 				assistantService.clearConversation(userId);
+				recentMediaByUser.remove(userId);
 				answer = RESET_REPLY;
 			} else if (!media.isEmpty()) {
-				answer = assistantService.understandMedia(userId, question, media);
+				assistantReply = assistantService.replyToMedia(userId, question, media);
+				answer = assistantReply.text();
 			} else {
 				assistantReply = assistantService.reply(userId, question);
 				answer = assistantReply.text();
 			}
-			answer = commandHandler.addWelcomeForFirstContact(userId, answer);
 			answer = safeReply(answer);
+			if (isSuperseded(userId, messageVersion)) {
+				log.info("检测到用户已有更新消息，取消发送过期回复：用户={}，旧版本={}，当前版本={}",
+						userId, messageVersion, currentMessageVersion(userId));
+				return;
+			}
 			long remainingDelay = receivedAt + targetDelayMs - System.currentTimeMillis();
 			if (remainingDelay > 0) {
 				sleep(remainingDelay);
 			}
+			if (isSuperseded(userId, messageVersion)) {
+				log.info("等待发送期间收到更新消息，取消发送过期回复：用户={}，旧版本={}，当前版本={}",
+						userId, messageVersion, currentMessageVersion(userId));
+				return;
+			}
+			answer = commandHandler.addWelcomeForFirstContact(userId, answer);
+			answer = safeReply(answer);
 			log.info("准备通过 iLink SDK 发送回复，字数={}，等待={}毫秒", answer.length(), targetDelayMs);
 			if (assistantReply != null && assistantReply.image() != null) {
 				client.sendImage(userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
@@ -243,6 +357,15 @@ public class IlinkChatRunner {
 				stopTyping(userId);
 			}
 		}
+	}
+
+	private long currentMessageVersion(String userId) {
+		AtomicLong version = userMessageVersions.get(userId);
+		return version == null ? 0 : version.get();
+	}
+
+	private boolean isSuperseded(String userId, long messageVersion) {
+		return currentMessageVersion(userId) > messageVersion;
 	}
 
 	private MediaExtraction extractMedia(WeixinMessage message) {
@@ -394,5 +517,15 @@ public class IlinkChatRunner {
 	}
 
 	private record MediaExtraction(List<MediaContent> media, boolean mediaItemFound, boolean failed) {
+	}
+
+	private static final class PendingBatch {
+		private String question = "";
+		private final java.util.ArrayList<MediaContent> media = new java.util.ArrayList<>();
+		private ScheduledFuture<?> flushTask;
+		private long messageVersion;
+	}
+
+	private record RecentMedia(List<MediaContent> media, long savedAtMs) {
 	}
 }

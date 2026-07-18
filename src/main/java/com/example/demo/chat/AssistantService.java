@@ -39,10 +39,22 @@ public class AssistantService {
 	}
 
 	public String understandMedia(String sessionId, String question, List<MediaContent> media) {
-		String mediaFacts = visualUnderstandingService.analyze(media);
+		return replyToMedia(sessionId, question, media).text();
+	}
+
+	public AssistantReply replyToMedia(String sessionId, String question, List<MediaContent> media) {
+		String mediaFacts = visualUnderstandingService.analyze(media, question);
 		String userRequest = question == null || question.isBlank()
 				? "请自然地告诉我你从刚才的图片或视频里看到了什么。"
 				: question.trim();
+		ImageGenerationIntent imageIntent = imageGenerationIntentParser.parse(mediaFacts);
+		if (imageIntent.requested()) {
+			log.info("多模态请求被路由到文生图模型，媒体数量={}，提示词长度={}", media.size(), imageIntent.prompt().length());
+			GeneratedImage image = imageGenerationService.generate(imageIntent.prompt());
+			String answer = "已根据你这次发送的内容生成好了 🎨";
+			conversationMemory.remember(sessionId, "[用户发送了 " + media.size() + " 个媒体] " + userRequest, answer);
+			return AssistantReply.image(answer, image);
+		}
 		String context = """
 				以下是视觉模型从用户刚发送的图片或视频中提取的内容。请把它当作事实依据，结合用户的问题作答。
 				不要机械复述，不要使用教程腔；语气要像微信聊天一样自然、友好，可根据画面氛围适度表达感受，但不要编造。
@@ -55,7 +67,7 @@ public class AssistantService {
 				? qwenService.chatWithContext(userRequest, context)
 				: qwenService.chatWithContext(userRequest, context, history);
 		conversationMemory.remember(sessionId, "[用户发送了图片或视频] " + userRequest, answer);
-		return answer;
+		return AssistantReply.text(answer);
 	}
 
 	public String chat(String question) {

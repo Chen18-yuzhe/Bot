@@ -45,13 +45,30 @@ class AssistantServiceTests {
 	void shouldPolishVisualAnalysisBeforeReplying() {
 		List<MediaContent> media = List.of(new MediaContent(MediaContent.MediaType.IMAGE,
 				new byte[] { 1, 2, 3 }, "image/jpeg"));
-		when(visualUnderstandingService.analyze(media)).thenReturn("海滩上，一个人与一只狗面对面坐着。");
+		when(visualUnderstandingService.analyze(media, "")).thenReturn("海滩上，一个人与一只狗面对面坐着。");
 		when(qwenService.chatWithContext(eq("请自然地告诉我你从刚才的图片或视频里看到了什么。"),
 				contains("不要机械复述"))).thenReturn("看起来像是海边的一次温馨互动，人和狗正面对面坐着呢。");
 
 		String answer = assistantService.understandMedia("wechat-user-1", "", media);
 
 		assertEquals("看起来像是海边的一次温馨互动，人和狗正面对面坐着呢。", answer);
+	}
+
+	@Test
+	void shouldRouteImageAndTextGenerationRequestWithoutDependingOnHistory() {
+		List<MediaContent> media = List.of(new MediaContent(MediaContent.MediaType.IMAGE,
+				new byte[] { 1, 2, 3 }, "image/png"));
+		String question = "生成一张类似的图片，把豆包放最上边";
+		String prompt = "暗色史诗场景，豆包标志位于画面最上方";
+		GeneratedImage generated = new GeneratedImage(new byte[] { 4, 5 }, "image/png", "wan.png");
+		when(visualUnderstandingService.analyze(media, question)).thenReturn("[IMAGE:" + prompt + "]");
+		when(imageGenerationService.generate(prompt)).thenReturn(generated);
+
+		AssistantReply reply = assistantService.replyToMedia("new-session", question, media);
+
+		assertEquals(generated, reply.image());
+		verify(qwenService, never()).chatWithContext(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.anyString());
 	}
 
 	@Test

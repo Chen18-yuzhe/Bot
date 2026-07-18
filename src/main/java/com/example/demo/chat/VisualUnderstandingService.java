@@ -25,10 +25,15 @@ public class VisualUnderstandingService {
 
 	private static final Logger log = LoggerFactory.getLogger(VisualUnderstandingService.class);
 	private static final String ANALYSIS_PROMPT = """
-			请仔细理解用户发送的媒体，提取后续回答所需的事实信息。图像要识别主体、动作、场景、文字和重要细节；
+			请把本轮用户文字和本轮所有媒体作为一个整体理解，并先判断用户的真实任务。
+			每个媒体已按发送顺序编号；多图比较、找差异、选择、排序等任务必须同时参考全部媒体，不要依赖旧对话猜测本轮附件。
+			如果且仅如果用户明确要求生成、绘制或制作一张新图片，只输出 [IMAGE:适合文生图模型的完整中文提示词]。
+			生成提示词要吸收参考图中与指令有关的主体、构图、风格、色彩、光线和位置关系，并落实用户要求的修改；不要声称能够逐像素复制。
+			编辑、替换、添加、删除图片元素也属于生成新图片。识别、描述、提取文字、评价、比较图片不属于生成。
+			其他任务只输出回答该任务所需的客观、充分的媒体事实。图像要识别主体、动作、场景、文字和重要细节；
 			视频要按时间顺序概括关键事件、人物动作、场景变化，并留意画面中的文字。
-			只输出客观、充分的内容分析，不要寒暄，不要使用“这是一张图片/这是一个视频”之类的教程式开头；
-			无法确定的内容要明确说明，不要猜测人物身份或敏感属性。
+			不要寒暄；无法确定的内容要明确说明，不要猜测人物身份或敏感属性。
+			用户本轮文字：%s
 			""";
 
 	private final String apiKey;
@@ -47,6 +52,10 @@ public class VisualUnderstandingService {
 	}
 
 	public String analyze(List<MediaContent> media) {
+		return analyze(media, "");
+	}
+
+	public String analyze(List<MediaContent> media, String userInstruction) {
 		if (apiKey == null || apiKey.isBlank()) {
 			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE, "请先配置环境变量 DASHSCOPE_API_KEY");
 		}
@@ -54,7 +63,7 @@ public class VisualUnderstandingService {
 			throw new ApplicationException(HttpStatus.BAD_REQUEST, "没有可识别的图片或视频");
 		}
 
-		List<Map<String, Object>> content = buildContent(media, videoFps);
+		List<Map<String, Object>> content = buildContent(media, videoFps, userInstruction);
 
 		MultiModalMessage userMessage = MultiModalMessage.builder()
 				.role(Role.USER.getValue())
@@ -87,6 +96,10 @@ public class VisualUnderstandingService {
 	}
 
 	static List<Map<String, Object>> buildContent(List<MediaContent> media, float videoFps) {
+		return buildContent(media, videoFps, "");
+	}
+
+	static List<Map<String, Object>> buildContent(List<MediaContent> media, float videoFps, String userInstruction) {
 		List<Map<String, Object>> content = new ArrayList<>();
 		for (MediaContent item : media) {
 			Map<String, Object> part = new HashMap<>();
@@ -100,7 +113,10 @@ public class VisualUnderstandingService {
 			}
 			content.add(part);
 		}
-		content.add(Map.of("text", ANALYSIS_PROMPT));
+		String instruction = userInstruction == null || userInstruction.isBlank()
+				? "（没有文字指令，请自然描述媒体内容）"
+				: userInstruction.trim();
+		content.add(Map.of("text", ANALYSIS_PROMPT.formatted(instruction)));
 		return content;
 	}
 
