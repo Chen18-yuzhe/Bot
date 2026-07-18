@@ -21,8 +21,38 @@ class AssistantServiceTests {
 
 	private final QwenService qwenService = mock(QwenService.class);
 	private final WeatherService weatherService = mock(WeatherService.class);
+	private final VisualUnderstandingService visualUnderstandingService = mock(VisualUnderstandingService.class);
+	private final ImageGenerationService imageGenerationService = mock(ImageGenerationService.class);
 	private final AssistantService assistantService = new AssistantService(
-			qwenService, weatherService, new WeatherIntentParser(), new ConversationMemory(8, 30));
+			qwenService, weatherService, new WeatherIntentParser(), new ConversationMemory(8, 30),
+			visualUnderstandingService, new ImageGenerationIntentParser(), imageGenerationService);
+
+	@Test
+	void shouldRouteExplicitImageRequestToWanModel() {
+		String question = "给我画一只在月球上的橘猫";
+		GeneratedImage generated = new GeneratedImage(new byte[] { 1, 2 }, "image/png", "wan.png");
+		when(qwenService.chat(question)).thenReturn("[IMAGE:一只橘猫穿着宇航服站在月球表面，电影感光影]");
+		when(imageGenerationService.generate("一只橘猫穿着宇航服站在月球表面，电影感光影"))
+				.thenReturn(generated);
+
+		AssistantReply reply = assistantService.reply("wechat-user-image", question);
+
+		assertEquals("图片生成好了 🎨", reply.text());
+		assertEquals(generated, reply.image());
+	}
+
+	@Test
+	void shouldPolishVisualAnalysisBeforeReplying() {
+		List<MediaContent> media = List.of(new MediaContent(MediaContent.MediaType.IMAGE,
+				new byte[] { 1, 2, 3 }, "image/jpeg"));
+		when(visualUnderstandingService.analyze(media)).thenReturn("海滩上，一个人与一只狗面对面坐着。");
+		when(qwenService.chatWithContext(eq("请自然地告诉我你从刚才的图片或视频里看到了什么。"),
+				contains("不要机械复述"))).thenReturn("看起来像是海边的一次温馨互动，人和狗正面对面坐着呢。");
+
+		String answer = assistantService.understandMedia("wechat-user-1", "", media);
+
+		assertEquals("看起来像是海边的一次温馨互动，人和狗正面对面坐着呢。", answer);
+	}
 
 	@Test
 	void shouldUseQwenDirectlyForNormalQuestion() {
@@ -41,7 +71,7 @@ class AssistantServiceTests {
 		WeatherResponse weather = new WeatherResponse(
 				"北京", "北京市", "晴", "30", "31", "45", "东南风", "2",
 				"2026-07-16T10:00+08:00", "2026-07-16T10:05+08:00");
-		when(qwenService.chat(question)).thenReturn("[[WEATHER:CURRENT:北京]]");
+		when(qwenService.chat(question)).thenReturn("[WEATHER:CURRENT:北京]");
 		when(weatherService.getCurrentWeather("北京")).thenReturn(weather);
 		when(qwenService.chatWithContext(eq(question), contains("温度：30℃")))
 				.thenReturn("北京现在晴，30℃。");

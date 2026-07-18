@@ -12,11 +12,28 @@ class WeatherIntentParserTests {
 
 	@Test
 	void shouldParseCurrentWeatherToolMarker() {
-		WeatherIntent intent = parser.parse("[[WEATHER:CURRENT:北京]]");
+		WeatherIntent intent = parser.parse("[WEATHER:CURRENT:北京]");
 
 		assertTrue(intent.weatherQuestion());
 		assertEquals("北京", intent.city());
 		assertEquals(WeatherIntent.WeatherQueryType.CURRENT, intent.queryType());
+	}
+
+	@Test
+	void shouldRemainCompatibleWithDoubleBracketMarker() {
+		WeatherIntent intent = parser.parse("[[WEATHER:CURRENT:北京]]");
+
+		assertTrue(intent.weatherQuestion());
+		assertEquals("北京", intent.city());
+	}
+
+	@Test
+	void shouldParseMarkerSurroundedByMarkdownAndWhitespace() {
+		WeatherIntent intent = parser.parse("`[ WEATHER : forecast : 杭州市 ]`");
+
+		assertTrue(intent.weatherQuestion());
+		assertEquals("杭州市", intent.city());
+		assertEquals(WeatherIntent.WeatherQueryType.FORECAST, intent.queryType());
 	}
 
 	@Test
@@ -37,7 +54,7 @@ class WeatherIntentParserTests {
 
 	@Test
 	void shouldIgnoreInvalidToolMarker() {
-		WeatherIntent intent = parser.parse("[[WEATHER:CURRENT:你为啥不能查]]");
+		WeatherIntent intent = parser.parse("[WEATHER:CURRENT:你为啥不能查]");
 
 		assertFalse(intent.weatherQuestion());
 	}

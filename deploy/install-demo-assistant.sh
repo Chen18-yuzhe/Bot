@@ -20,8 +20,45 @@ if [[ ! -f "${SOURCE_JAR}" ]]; then
   exit 1
 fi
 
+JAVA_BIN=""
+
+find_java_bin() {
+  local candidate path_major
+  if command -v java >/dev/null 2>&1; then
+    candidate="$(command -v java)"
+    path_major="$(java_major_version "${candidate}" || true)"
+    if [[ "${path_major}" =~ ^[0-9]+$ ]] && (( path_major >= 21 )); then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  fi
+  for candidate in /usr/lib/jvm/*/bin/java /usr/java/*/bin/java /opt/*/bin/java; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  if command -v rpm >/dev/null 2>&1; then
+    local package_name rpm_java
+    while read -r package_name; do
+      [[ -n "${package_name}" ]] || continue
+      rpm_java="$(rpm -ql "${package_name}" 2>/dev/null | awk '/\/bin\/java$/ {print; exit}')"
+      if [[ -n "${rpm_java}" && -x "${rpm_java}" ]]; then
+        printf '%s\n' "${rpm_java}"
+        return 0
+      fi
+    done < <(rpm -qa | grep -Ei '(^|[-_.])(java|jdk|jre|dragonwell|corretto).*21|21.*(java|jdk|jre|dragonwell|corretto)' || true)
+  fi
+  return 1
+}
+
 java_major_version() {
-  java -version 2>&1 | awk -F'[\".]' '/version/ {print $2; exit}'
+  local java_bin="${1:-${JAVA_BIN}}" version_line
+  [[ -n "${java_bin}" && -x "${java_bin}" ]] || return 1
+  version_line="$(${java_bin} -version 2>&1 | head -n 1 || true)"
+  if [[ "${version_line}" =~ version[[:space:]]+\"([0-9]+) ]] || [[ "${version_line}" =~ openjdk[[:space:]]+([0-9]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
 }
 
 install_java_from_package_manager() {
@@ -63,22 +100,21 @@ install_java_from_adoptium() {
   ln -sfn /opt/java-21/bin/java /usr/local/bin/java
 }
 
-current_java_major=""
-if command -v java >/dev/null 2>&1; then
-  current_java_major="$(java_major_version || true)"
-fi
+JAVA_BIN="$(find_java_bin || true)"
+current_java_major="$(java_major_version "${JAVA_BIN}" || true)"
 
 if [[ ! "${current_java_major}" =~ ^[0-9]+$ ]] || (( current_java_major < 21 )); then
   echo "A usable Java 21 runtime was not found. Installing it now..."
   install_java_from_package_manager || install_java_from_adoptium
 fi
 
-current_java_major="$(java_major_version || true)"
+JAVA_BIN="$(find_java_bin || true)"
+current_java_major="$(java_major_version "${JAVA_BIN}" || true)"
 if [[ ! "${current_java_major}" =~ ^[0-9]+$ ]] || (( current_java_major < 21 )); then
   echo "ERROR: Java 21 installation failed."
   exit 1
 fi
-JAVA_BIN="$(readlink -f "$(command -v java)")"
+JAVA_BIN="$(readlink -f "${JAVA_BIN}")"
 echo "Java is ready: $(${JAVA_BIN} -version 2>&1 | head -n 1)"
 
 if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -94,8 +130,8 @@ echo
 echo "Enter the application settings. API Key input is hidden and is not saved in shell history."
 read -r -s -p "DASHSCOPE_API_KEY: " DASHSCOPE_API_KEY
 echo
-read -r -p "DASHSCOPE_BASE_URL [https://dashscope.aliyuncs.com/compatible-mode/v1/]: " DASHSCOPE_BASE_URL
-DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/}"
+read -r -p "DASHSCOPE_BASE_URL [https://dashscope.aliyuncs.com/api/v1]: " DASHSCOPE_BASE_URL
+DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/api/v1}"
 read -r -p "QWEATHER_API_HOST (your dedicated API Host): " QWEATHER_API_HOST
 read -r -s -p "QWEATHER_API_KEY: " QWEATHER_API_KEY
 echo
@@ -114,6 +150,9 @@ umask 0077
 {
   printf 'DASHSCOPE_API_KEY=%s\n' "${DASHSCOPE_API_KEY}"
   printf 'DASHSCOPE_BASE_URL=%s\n' "${DASHSCOPE_BASE_URL}"
+  printf 'DASHSCOPE_MODEL=qwen3.7-plus\n'
+  printf 'DASHSCOPE_IMAGE_MODEL=wan2.7-image-pro\n'
+  printf 'DASHSCOPE_IMAGE_SIZE=2K\n'
   printf 'QWEATHER_API_HOST=%s\n' "${QWEATHER_API_HOST}"
   printf 'QWEATHER_API_KEY=%s\n' "${QWEATHER_API_KEY}"
   printf 'ILINK_CREDENTIALS_FILE=%s\n' "${DATA_DIR}/.demo-ilink/credentials.json"

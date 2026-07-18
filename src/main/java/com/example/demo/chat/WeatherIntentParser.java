@@ -2,6 +2,7 @@ package com.example.demo.chat;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Locale;
 
 import org.springframework.stereotype.Component;
 
@@ -9,7 +10,8 @@ import org.springframework.stereotype.Component;
 public class WeatherIntentParser {
 
 	private static final Pattern WEATHER_TOOL_PATTERN = Pattern.compile(
-			"\\[\\[WEATHER:(CURRENT|FORECAST):([\\p{IsHan}]{2,24})\\]\\]");
+			"\\[{1,2}\\s*WEATHER\\s*:\\s*(CURRENT|FORECAST)\\s*:\\s*([\\p{IsHan}]{2,24})\\s*\\]{1,2}",
+			Pattern.CASE_INSENSITIVE);
 	private static final Pattern INVALID_CITY_PATTERN = Pattern.compile(
 			"为什么|为啥|不能|无法|不会|查询|怎么|如何|你|我");
 
@@ -26,12 +28,13 @@ public class WeatherIntentParser {
 			return WeatherIntent.notWeather();
 		}
 
-		String city = matcher.group(2);
+		String city = matcher.group(2).trim();
 		if (INVALID_CITY_PATTERN.matcher(city).find()) {
 			return WeatherIntent.notWeather();
 		}
 
-		WeatherIntent.WeatherQueryType queryType = WeatherIntent.WeatherQueryType.valueOf(matcher.group(1));
+		WeatherIntent.WeatherQueryType queryType = WeatherIntent.WeatherQueryType.valueOf(
+				matcher.group(1).toUpperCase(Locale.ROOT));
 		return WeatherIntent.weather(city, queryType);
 	}
 }

@@ -16,6 +16,10 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 import com.example.demo.chat.AssistantService;
+import com.example.demo.chat.AssistantReply;
+import com.example.demo.chat.MediaContent;
+import com.example.demo.chat.MediaContent.MediaType;
+import com.example.demo.ApplicationException;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.ILinkClientBuilder;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
@@ -39,6 +43,7 @@ public class IlinkChatRunner {
 	private final long minReplyDelayMs;
 	private final long maxReplyDelayMs;
 	private final int maxReplyChars;
+	private final long maxMediaBytes;
 	private final long acceptMessagesAfterMs = System.currentTimeMillis() - 5_000;
 	private final Map<Long, Boolean> seenMessageIds = new LinkedHashMap<>(128, 0.75f, true) {
 		@Override
@@ -54,13 +59,15 @@ public class IlinkChatRunner {
 			WechatCommandHandler commandHandler,
 			@Value("${assistant.ilink.min-reply-delay-ms:13000}") long minReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
-			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars) {
+			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars,
+			@Value("${assistant.ilink.max-media-bytes:104857600}") long maxMediaBytes) {
 		this.assistantService = assistantService;
 		this.sessionStore = sessionStore;
 		this.commandHandler = commandHandler;
 		this.minReplyDelayMs = Math.max(0, minReplyDelayMs);
 		this.maxReplyDelayMs = Math.max(this.minReplyDelayMs, maxReplyDelayMs);
 		this.maxReplyChars = Math.max(100, maxReplyChars);
+		this.maxMediaBytes = Math.max(1_048_576, maxMediaBytes);
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
@@ -148,25 +155,22 @@ public class IlinkChatRunner {
 		if (messages == null || messages.isEmpty()) {
 			return;
 		}
-		Map<String, StringBuilder> questionsByUser = new LinkedHashMap<>();
 		for (WeixinMessage message : messages) {
 			if (!isNewUserMessage(message)) {
 				continue;
 			}
 			String text = extractText(message);
-			if (text == null || text.isBlank()) {
+			MediaExtraction extraction = extractMedia(message);
+			List<MediaContent> media = extraction.media();
+			if (extraction.mediaItemFound() && media.isEmpty() && extraction.failed()) {
+				sendMediaFailureReply(message.getFrom_user_id());
 				continue;
 			}
-			questionsByUser.computeIfAbsent(message.getFrom_user_id(), ignored -> new StringBuilder())
-					.append(text.trim()).append('\n');
-		}
-
-		for (Map.Entry<String, StringBuilder> entry : questionsByUser.entrySet()) {
-			String question = entry.getValue().toString().trim();
-			if (!question.isEmpty()) {
-				handleQuestion(entry.getKey(), question);
-				saveSession();
+			if ((text == null || text.isBlank()) && media.isEmpty()) {
+				continue;
 			}
+			handleQuestion(message.getFrom_user_id(), text == null ? "" : text.trim(), media);
+			saveSession();
 		}
 	}
 
@@ -190,22 +194,26 @@ public class IlinkChatRunner {
 		return true;
 	}
 
-	private void handleQuestion(String userId, String question) throws InterruptedException {
+	private void handleQuestion(String userId, String question, List<MediaContent> media) throws InterruptedException {
 		long receivedAt = System.currentTimeMillis();
 		long targetDelayMs = randomDelayMs();
-		log.info("收到 iLink 消息：{}", question);
+		log.info("收到 iLink 消息：文本字符数={}，媒体数量={}", question.length(), media.size());
 
 		boolean typingStarted = startTyping(userId);
 		try {
 			String answer;
-			String commandReply = commandHandler.handle(question);
+			AssistantReply assistantReply = null;
+			String commandReply = media.isEmpty() ? commandHandler.handle(question) : null;
 			if (commandReply != null) {
 				answer = commandReply;
 			} else if (isResetCommand(question)) {
 				assistantService.clearConversation(userId);
 				answer = RESET_REPLY;
+			} else if (!media.isEmpty()) {
+				answer = assistantService.understandMedia(userId, question, media);
 			} else {
-				answer = assistantService.chat(userId, question);
+				assistantReply = assistantService.reply(userId, question);
+				answer = assistantReply.text();
 			}
 			answer = commandHandler.addWelcomeForFirstContact(userId, answer);
 			answer = safeReply(answer);
@@ -214,8 +222,19 @@ public class IlinkChatRunner {
 				sleep(remainingDelay);
 			}
 			log.info("准备通过 iLink SDK 发送回复，字数={}，等待={}毫秒", answer.length(), targetDelayMs);
-			client.sendText(userId, answer);
+			if (assistantReply != null && assistantReply.image() != null) {
+				client.sendImage(userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
+			} else {
+				client.sendText(userId, answer);
+			}
 			log.info("iLink SDK 回复发送成功");
+		} catch (ApplicationException exception) {
+			log.warn("iLink 请求处理失败：{}", exception.getMessage());
+			try {
+				client.sendText(userId, safeReply(exception.getMessage()));
+			} catch (IOException sendException) {
+				log.error("向微信发送错误提示失败：{}", sendException.getMessage(), sendException);
+			}
 		} catch (IOException | RuntimeException exception) {
 			log.error("iLink 消息处理或回复失败，本条消息已跳过，监听继续：{}",
 					exception.getMessage(), exception);
@@ -224,6 +243,74 @@ public class IlinkChatRunner {
 				stopTyping(userId);
 			}
 		}
+	}
+
+	private MediaExtraction extractMedia(WeixinMessage message) {
+		if (message.getItem_list() == null) {
+			return new MediaExtraction(List.of(), false, false);
+		}
+		List<MediaContent> result = new java.util.ArrayList<>();
+		boolean mediaItemFound = false;
+		boolean failed = false;
+		for (MessageItem item : message.getItem_list()) {
+			if (item == null) {
+				continue;
+			}
+			try {
+				if (item.getImage_item() != null) {
+					mediaItemFound = true;
+					byte[] bytes = client.downloadImageFromMessageItem(item);
+					validateMediaSize(bytes);
+					result.add(new MediaContent(MediaType.IMAGE, bytes, detectImageMimeType(bytes)));
+				} else if (item.getVideo_item() != null) {
+					mediaItemFound = true;
+					byte[] bytes = client.downloadVideoFromMessageItem(item);
+					validateMediaSize(bytes);
+					result.add(new MediaContent(MediaType.VIDEO, bytes, "video/mp4"));
+				}
+			} catch (IOException | IllegalArgumentException exception) {
+				failed = true;
+				log.warn("下载或校验微信图片/视频失败：{}", exception.getMessage());
+			}
+		}
+		return new MediaExtraction(result, mediaItemFound, failed);
+	}
+
+	private void sendMediaFailureReply(String userId) throws InterruptedException {
+		boolean typingStarted = startTyping(userId);
+		try {
+			sleep(randomDelayMs());
+			client.sendText(userId, "这张图片或视频下载失败了，可能文件过大或格式暂不支持，请换一个文件再试。");
+		} catch (IOException exception) {
+			log.error("发送媒体失败提示时出错：{}", exception.getMessage(), exception);
+		} finally {
+			if (typingStarted) {
+				stopTyping(userId);
+			}
+		}
+	}
+
+	private void validateMediaSize(byte[] bytes) {
+		if (bytes == null || bytes.length == 0) {
+			throw new IllegalArgumentException("微信媒体内容为空");
+		}
+		if (bytes.length > maxMediaBytes) {
+			throw new IllegalArgumentException("微信媒体超过大小限制：" + maxMediaBytes + " bytes");
+		}
+	}
+
+	private static String detectImageMimeType(byte[] bytes) {
+		if (bytes.length >= 8 && bytes[0] == (byte) 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4e && bytes[3] == 0x47) {
+			return "image/png";
+		}
+		if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+				&& bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+			return "image/webp";
+		}
+		if (bytes.length >= 2 && bytes[0] == 'B' && bytes[1] == 'M') {
+			return "image/bmp";
+		}
+		return "image/jpeg";
 	}
 
 	private boolean startTyping(String userId) {
@@ -304,5 +391,8 @@ public class IlinkChatRunner {
 
 	private static void sleep(long millis) throws InterruptedException {
 		TimeUnit.MILLISECONDS.sleep(Math.max(0, millis));
+	}
+
+	private record MediaExtraction(List<MediaContent> media, boolean mediaItemFound, boolean failed) {
 	}
 }

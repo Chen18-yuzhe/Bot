@@ -12,6 +12,9 @@
 - 在 13～17 秒之间发送回复，避免固定节奏
 - SDK 网络重试带随机抖动，连续失败时最长等待 60 秒，避免请求风暴
 - 按微信用户隔离连续对话，默认保留最近 8 轮、30 分钟
+- 接收微信图片和视频，使用 DashScope Java SDK 调用千问进行内容理解
+- 视觉结果会再次交给千问按微信聊天语气组织，避免机械的教程式画面描述
+- 明确要求画图或生成图片时，由千问整理提示词并路由到 `wan2.7-image-pro`，生成后直接发送图片到微信
 - 对话记忆仅在内存中，不写入磁盘；程序重启后自动清空
 - 回复最长 1800 字，避免单条消息过长
 
@@ -42,8 +45,15 @@ java -jar "D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar" `
 assistant.ilink.min-reply-delay-ms=13000
 assistant.ilink.max-reply-delay-ms=17000
 assistant.ilink.max-reply-chars=1800
+assistant.ilink.max-media-bytes=104857600
 assistant.conversation.max-turns=8
 assistant.conversation.ttl-minutes=30
+aliyun.dashscope.model=qwen3.7-plus
+aliyun.dashscope.image-model=wan2.7-image-pro
+aliyun.dashscope.image-size=2K
+aliyun.dashscope.video-fps=2
 ```
+
+`video-fps` 范围为 0.1～10，运动较快的视频可适当提高，长视频可降低以控制处理量。
 
 为了降低测试风险，不建议把延迟设置为 0，也不建议同时运行多个使用同一登录凭据的程序实例。
