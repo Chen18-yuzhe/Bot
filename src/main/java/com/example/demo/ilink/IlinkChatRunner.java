@@ -25,6 +25,7 @@ import com.example.demo.chat.AssistantService;
 import com.example.demo.chat.AssistantReply;
 import com.example.demo.chat.MediaContent;
 import com.example.demo.chat.MediaContent.MediaType;
+import com.example.demo.audio.AudioService;
 import com.example.demo.ApplicationException;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.ILinkClientBuilder;
@@ -38,6 +39,8 @@ import jakarta.annotation.PreDestroy;
 @Component
 @ConditionalOnProperty(name = "assistant.ilink-enabled", havingValue = "true")
 public class IlinkChatRunner {
+	@org.springframework.beans.factory.annotation.Autowired
+	private AudioService audioService;
 
 	private static final Logger log = LoggerFactory.getLogger(IlinkChatRunner.class);
 	private static final int MAX_SEEN_MESSAGE_IDS = 500;
@@ -181,6 +184,11 @@ public class IlinkChatRunner {
 			return;
 		}
 		for (WeixinMessage message : messages) {
+			if (message != null) {
+				log.info("iLink 原始消息：id={}，类型={}，发送方={}，消息项数量={}", message.getMessage_id(),
+						message.getMessage_type(), message.getFrom_user_id(),
+						message.getItem_list() == null ? 0 : message.getItem_list().size());
+			}
 			if (!isNewUserMessage(message)) {
 				continue;
 			}
@@ -205,7 +213,9 @@ public class IlinkChatRunner {
 		ScheduledFuture<?> previous;
 		int totalMedia;
 		boolean hasText;
+		long flushDelayMs;
 		synchronized (batch) {
+			boolean hadMedia = !batch.media.isEmpty();
 			if (!question.isBlank()) {
 				if (!batch.question.isBlank()) {
 					batch.question += "\n" + question;
@@ -217,13 +227,17 @@ public class IlinkChatRunner {
 			batch.messageVersion = messageVersion;
 			totalMedia = batch.media.size();
 			hasText = !batch.question.isBlank();
+			flushDelayMs = !media.isEmpty() || hadMedia ? mediaBatchWindowMs : 700L;
+			if (hadMedia && !media.isEmpty() && !question.isBlank()) {
+				flushDelayMs = Math.min(flushDelayMs, 900L);
+			}
 			if (!batch.media.isEmpty()) {
 				recentMediaByUser.put(userId,
 						new RecentMedia(List.copyOf(batch.media), System.currentTimeMillis()));
 			}
 			previous = batch.flushTask;
 			batch.flushTask = batchExecutor.schedule(() -> flushQuestion(userId, batch),
-					mediaBatchWindowMs, TimeUnit.MILLISECONDS);
+					flushDelayMs, TimeUnit.MILLISECONDS);
 		}
 		if (previous != null) {
 			previous.cancel(false);
@@ -275,8 +289,12 @@ public class IlinkChatRunner {
 	}
 
 	private boolean isNewUserMessage(WeixinMessage message) {
-		if (message == null || !Integer.valueOf(1).equals(message.getMessage_type())
-				|| message.getFrom_user_id() == null || message.getFrom_user_id().isBlank()) {
+		if (message == null || message.getFrom_user_id() == null || message.getFrom_user_id().isBlank()) {
+			return false;
+		}
+		boolean normalMessage = Integer.valueOf(1).equals(message.getMessage_type());
+		boolean hasMessageItems = message.getItem_list() != null && !message.getItem_list().isEmpty();
+		if (!normalMessage && !hasMessageItems) {
 			return false;
 		}
 		if (message.getCreate_time_ms() != null && message.getCreate_time_ms() < acceptMessagesAfterMs) {
@@ -303,14 +321,35 @@ public class IlinkChatRunner {
 		boolean typingStarted = startTyping(userId);
 		try {
 			String answer;
+			byte[] synthesizedAudio = null;
 			AssistantReply assistantReply = null;
 			String commandReply = media.isEmpty() ? commandHandler.handle(question) : null;
-			if (commandReply != null) {
+			String textToSynthesize = synthesisText(question, media);
+			if (textToSynthesize != null) {
+				synthesizedAudio = audioService.synthesize(textToSynthesize);
+				answer = "语音合成完成，已生成 WAV 文件。";
+			} else if (commandReply != null) {
 				answer = commandReply;
 			} else if (isResetCommand(question)) {
 				assistantService.clearConversation(userId);
 				recentMediaByUser.remove(userId);
 				answer = RESET_REPLY;
+			} else if (!media.isEmpty() && media.get(0).type() == MediaType.AUDIO && "audio/silk".equals(media.get(0).mimeType())) {
+				answer = "抱歉，暂不支持微信语音气泡格式，请将音频以 WAV 或 MP3 文件发送。";
+			} else if (!media.isEmpty() && media.get(0).type() == MediaType.AUDIO) {
+				String transcript;
+				if (question == null || question.isBlank()) {
+					java.nio.file.Path audioPath = writeTempAudio(media.get(0));
+					try {
+						transcript = audioService.recognize(audioPath.toFile());
+					} finally {
+						java.nio.file.Files.deleteIfExists(audioPath);
+					}
+				} else {
+					transcript = question;
+				}
+				log.info("语音识别文本：{}", transcript);
+				answer = assistantService.chat(userId, transcript);
 			} else if (!media.isEmpty()) {
 				assistantReply = assistantService.replyToMedia(userId, question, media);
 				answer = assistantReply.text();
@@ -333,10 +372,16 @@ public class IlinkChatRunner {
 						userId, messageVersion, currentMessageVersion(userId));
 				return;
 			}
-			answer = commandHandler.addWelcomeForFirstContact(userId, answer);
+			boolean unsupportedVoice = !media.isEmpty() && media.get(0).type() == MediaType.AUDIO
+					&& "audio/silk".equals(media.get(0).mimeType());
+			if (synthesizedAudio == null && !unsupportedVoice) {
+				answer = commandHandler.addWelcomeForFirstContact(userId, answer);
+			}
 			answer = safeReply(answer);
 			log.info("准备通过 iLink SDK 发送回复，字数={}，等待={}毫秒", answer.length(), targetDelayMs);
-			if (assistantReply != null && assistantReply.image() != null) {
+			if (synthesizedAudio != null) {
+				client.sendFile(userId, synthesizedAudio, "speech.wav", answer);
+			} else if (assistantReply != null && assistantReply.image() != null) {
 				client.sendImage(userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
 			} else {
 				client.sendText(userId, answer);
@@ -379,6 +424,9 @@ public class IlinkChatRunner {
 			if (item == null) {
 				continue;
 			}
+			log.info("iLink 消息项：类型={}，文本={}，图片={}，视频={}，语音={}，文件={}", item.getType(),
+					item.getText_item() != null, item.getImage_item() != null, item.getVideo_item() != null,
+					item.getVoice_item() != null, item.getFile_item() != null);
 			try {
 				if (item.getImage_item() != null) {
 					mediaItemFound = true;
@@ -390,6 +438,16 @@ public class IlinkChatRunner {
 					byte[] bytes = client.downloadVideoFromMessageItem(item);
 					validateMediaSize(bytes);
 					result.add(new MediaContent(MediaType.VIDEO, bytes, "video/mp4"));
+				} else if (item.getVoice_item() != null) {
+					mediaItemFound = true;
+					result.add(new MediaContent(MediaType.AUDIO, new byte[0], "audio/silk"));
+				} else if (item.getFile_item() != null && isAudioFile(item.getFile_item().getFile_name())) {
+					mediaItemFound = true;
+					String fileName = item.getFile_item().getFile_name();
+					byte[] bytes = client.downloadFileFromMessageItem(item);
+					validateMediaSize(bytes);
+					result.add(new MediaContent(MediaType.AUDIO, bytes, audioMimeType(fileName)));
+					log.info("已下载微信音频文件：文件名={}，字节数={}", fileName, bytes.length);
 				}
 			} catch (IOException | IllegalArgumentException exception) {
 				failed = true;
@@ -397,6 +455,48 @@ public class IlinkChatRunner {
 			}
 		}
 		return new MediaExtraction(result, mediaItemFound, failed);
+	}
+
+	private java.nio.file.Path writeTempAudio(MediaContent media) throws IOException {
+		java.nio.file.Path path = java.nio.file.Files.createTempFile("wechat-audio-", audioExtension(media.mimeType()));
+		java.nio.file.Files.write(path, media.data());
+		return path;
+	}
+
+	private static boolean isAudioFile(String fileName) {
+		if (fileName == null) return false;
+		String value = fileName.toLowerCase(java.util.Locale.ROOT);
+		return value.endsWith(".wav") || value.endsWith(".mp3") || value.endsWith(".m4a")
+				|| value.endsWith(".flac") || value.endsWith(".ogg") || value.endsWith(".opus")
+				|| value.endsWith(".aac") || value.endsWith(".amr") || value.endsWith(".wma");
+	}
+
+	private static String audioMimeType(String fileName) {
+		String value = fileName.toLowerCase(java.util.Locale.ROOT);
+		if (value.endsWith(".wav")) return "audio/wav";
+		if (value.endsWith(".mp3")) return "audio/mpeg";
+		if (value.endsWith(".m4a")) return "audio/mp4";
+		if (value.endsWith(".flac")) return "audio/flac";
+		if (value.endsWith(".ogg")) return "audio/ogg";
+		if (value.endsWith(".opus")) return "audio/opus";
+		if (value.endsWith(".aac")) return "audio/aac";
+		if (value.endsWith(".amr")) return "audio/amr";
+		return "audio/x-ms-wma";
+	}
+
+	private static String audioExtension(String mimeType) {
+		return switch (mimeType) {
+			case "audio/wav" -> ".wav";
+			case "audio/mpeg" -> ".mp3";
+			case "audio/mp4" -> ".m4a";
+			case "audio/flac" -> ".flac";
+			case "audio/ogg" -> ".ogg";
+			case "audio/opus" -> ".opus";
+			case "audio/aac" -> ".aac";
+			case "audio/amr" -> ".amr";
+			case "audio/x-ms-wma" -> ".wma";
+			default -> ".silk";
+		};
 	}
 
 	private void sendMediaFailureReply(String userId) throws InterruptedException {
@@ -498,18 +598,31 @@ public class IlinkChatRunner {
 		if (message.getItem_list() == null) {
 			return null;
 		}
-		return message.getItem_list().stream()
+		String extractedText = message.getItem_list().stream()
 				.filter(item -> item != null && item.getText_item() != null)
 				.map(MessageItem::getText_item)
 				.map(textItem -> textItem.getText())
 				.filter(text -> text != null && !text.isBlank())
 				.findFirst()
 				.orElse(null);
+		if (extractedText != null) {
+			return extractedText;
+		}
+		return null;
 	}
 
 	private static boolean isResetCommand(String question) {
 		String value = question.trim();
 		return "/reset".equalsIgnoreCase(value) || "清除对话".equals(value) || "重新开始".equals(value);
+	}
+
+	private static String synthesisText(String question, List<MediaContent> media) {
+		if ((media != null && !media.isEmpty()) || question == null) {
+			return null;
+		}
+		java.util.regex.Matcher matcher = Pattern.compile("^\\s*(?:语音合成|合成语音)\\s*[：:]\\s*(.+?)\\s*$")
+				.matcher(question);
+		return matcher.matches() ? matcher.group(1) : null;
 	}
 
 	private static void sleep(long millis) throws InterruptedException {

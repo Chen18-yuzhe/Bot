@@ -4,9 +4,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @SpringBootApplication
 public class DemoApplication {
+	@Bean
+	ObjectMapper objectMapper() {
+		return new ObjectMapper();
+	}
 
 	private static final Logger log = LoggerFactory.getLogger(DemoApplication.class);
 

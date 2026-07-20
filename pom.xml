@@ -57,6 +57,14 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
+			<exclusions>
+				<!-- DashScope SDK 2.x uses Jackson 2; Boot 4's Jackson 3 jars
+				     share packages and cause runtime classloader conflicts. -->
+				<exclusion>
+					<groupId>org.springframework.boot</groupId>
+					<artifactId>spring-boot-starter-jackson</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 
 		<dependency>

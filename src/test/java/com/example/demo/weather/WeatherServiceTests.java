@@ -10,7 +10,7 @@ import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.Test;
 
 import com.example.demo.ApplicationException;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 class WeatherServiceTests {
 

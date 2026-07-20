@@ -4,6 +4,6 @@ package com.example.demo.chat;
 public record MediaContent(MediaType type, byte[] data, String mimeType) {
 
 	public enum MediaType {
-		IMAGE, VIDEO
+		IMAGE, VIDEO, AUDIO
 	}
 }
