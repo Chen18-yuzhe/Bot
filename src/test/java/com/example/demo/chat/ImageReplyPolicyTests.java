@@ -1,0 +1,22 @@
+package com.example.demo.chat;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import org.junit.jupiter.api.Test;
+
+class ImageReplyPolicyTests {
+	@Test
+	void shouldRecognizeImageFollowUpInstructions() {
+		assertTrue(ImageReplyPolicy.referencesUploadedImage("描述一下"));
+		assertTrue(ImageReplyPolicy.referencesUploadedImage("帮我分析这张图片"));
+		assertTrue(ImageReplyPolicy.referencesUploadedImage("比较两张图有什么不同"));
+		assertTrue(ImageReplyPolicy.referencesUploadedImage("把刚才的照片背景换掉"));
+	}
+
+	@Test
+	void shouldNotConsumeUnrelatedConversation() {
+		assertFalse(ImageReplyPolicy.referencesUploadedImage("帮我分析一下 Java 代码"));
+		assertFalse(ImageReplyPolicy.referencesUploadedImage("今天北京天气怎么样"));
+	}
+}

@@ -23,6 +23,6 @@ class VisualUnderstandingServiceTests {
 		assertEquals(2.0f, content.get(1).get("fps"));
 		assertTrue(content.get(2).get("text").toString().contains("比较两张图"));
 		assertTrue(content.get(2).get("text").toString().contains("多图比较"));
-		assertTrue(content.get(2).get("text").toString().contains("[IMAGE:"));
+		assertTrue(content.get(2).get("text").toString().contains("不要输出工具调用标记"));
 	}
 }

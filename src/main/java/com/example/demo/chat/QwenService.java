@@ -23,12 +23,6 @@ public class QwenService {
 
 	private static final Logger log = LoggerFactory.getLogger(QwenService.class);
 	private static final String SYSTEM_PROMPT = "你是一个运行在微信中的AI助手，请用简洁、友好的中文回答用户问题。";
-	private static final String ROUTING_SYSTEM_PROMPT = SYSTEM_PROMPT + "\n"
-			+ "当且仅当用户明确要求查询某个城市天气且城市明确时，只返回 [WEATHER:CURRENT:城市名] 或 [WEATHER:FORECAST:城市名]。"
-			+ "当且仅当用户明确要求生成、绘制、画一张图片时，只返回 [IMAGE:适合文生图模型的完整中文提示词]。"
-			+ "整理文生图提示词时：人物写真必须明确为成年人；不要保留真实导演、艺术家或摄影师姓名，改写成可观察的构图、色彩、光线和镜头语言；不要添加用户未要求的敏感内容。"
-			+ "仅仅讨论图片、询问图片知识或发送已有图片不属于文生图请求。"
-			+ "天气和文生图标记不能同时返回。其他问题正常回答；天气问题没有城市时直接追问城市。";
 
 	private final String apiKey;
 	private final String model;
@@ -60,7 +54,7 @@ public class QwenService {
 		}
 
 		List<Object> messages = new ArrayList<>();
-		messages.add(message(Role.SYSTEM, context == null || context.isBlank() ? ROUTING_SYSTEM_PROMPT : SYSTEM_PROMPT));
+		messages.add(message(Role.SYSTEM, SYSTEM_PROMPT));
 		if (context != null && !context.isBlank()) {
 			messages.add(message(Role.SYSTEM, context));
 		}

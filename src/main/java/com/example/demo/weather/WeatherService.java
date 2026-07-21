@@ -20,6 +20,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import com.example.demo.ApplicationException;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
@@ -180,10 +181,14 @@ public class WeatherService {
 		}
 	}
 
-	private <T> T readJson(String json, Class<T> responseType) {
+	<T> T readJson(String json, Class<T> responseType) {
 		try {
 			return objectMapper.readValue(json, responseType);
 		} catch (Exception exception) {
+			String excerpt = json == null ? "null" : json.replaceAll("\\s+", " ").trim();
+			if (excerpt.length() > 300) excerpt = excerpt.substring(0, 300) + "……";
+			log.warn("和风天气响应解析失败：类型={}，响应摘要={}，原因={}",
+					responseType.getSimpleName(), excerpt, exception.getMessage());
 			throw new ApplicationException(HttpStatus.BAD_GATEWAY,
 					"无法解析和风天气返回的数据", exception);
 		}
@@ -214,19 +219,24 @@ public class WeatherService {
 		return normalized;
 	}
 
-	private record CityLookupResponse(String code, List<Location> location) {
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	record CityLookupResponse(String code, List<Location> location) {
 	}
 
-	private record Location(String name, String id, String adm1) {
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	record Location(String name, String id, String adm1) {
 	}
 
-	private record WeatherApiResponse(String code, String updateTime, CurrentWeather now) {
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	record WeatherApiResponse(String code, String updateTime, CurrentWeather now) {
 	}
 
-	private record ForecastApiResponse(String code, String updateTime, List<DailyForecast> daily) {
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	record ForecastApiResponse(String code, String updateTime, List<DailyForecast> daily) {
 	}
 
-	private record DailyForecast(
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	record DailyForecast(
 			String fxDate,
 			String tempMax,
 			String tempMin,
@@ -238,7 +248,8 @@ public class WeatherService {
 			String precip) {
 	}
 
-	private record CurrentWeather(
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	record CurrentWeather(
 			String obsTime,
 			String temp,
 			String feelsLike,

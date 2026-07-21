@@ -46,9 +46,14 @@ public class AudioService {
     }
   }
   public byte[] synthesize(String text) {
+    return synthesize(text, voice);
+  }
+
+  public byte[] synthesize(String text, String selectedVoice) {
     requireKey(); if (text == null || text.isBlank()) throw new IllegalArgumentException("Text cannot be blank");
     try {
-      var p = SpeechSynthesisParam.builder().apiKey(apiKey).model(ttsModel).voice(voice)
+      String effectiveVoice = selectedVoice == null || selectedVoice.isBlank() ? voice : selectedVoice;
+      var p = SpeechSynthesisParam.builder().apiKey(apiKey).model(ttsModel).voice(effectiveVoice)
           .format(SpeechSynthesisAudioFormat.WAV_16000HZ_MONO_16BIT).build();
       ByteBuffer b = new SpeechSynthesizer(p, null).call(text);
       byte[] out = new byte[b.remaining()]; b.get(out); return out;

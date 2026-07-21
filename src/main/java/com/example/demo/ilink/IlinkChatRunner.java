@@ -23,10 +23,15 @@ import org.springframework.stereotype.Component;
 
 import com.example.demo.chat.AssistantService;
 import com.example.demo.chat.AssistantReply;
+import com.example.demo.chat.ImageReplyPolicy;
 import com.example.demo.chat.MediaContent;
 import com.example.demo.chat.MediaContent.MediaType;
 import com.example.demo.audio.AudioService;
+import com.example.demo.audio.VoicePreferenceService;
 import com.example.demo.ApplicationException;
+import com.example.demo.document.DocumentSummaryService;
+import com.example.demo.document.GeneratedDocument;
+import com.example.demo.document.DocumentReplyPolicy;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.ILinkClientBuilder;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
@@ -41,15 +46,14 @@ import jakarta.annotation.PreDestroy;
 public class IlinkChatRunner {
 	@org.springframework.beans.factory.annotation.Autowired
 	private AudioService audioService;
+	@org.springframework.beans.factory.annotation.Autowired
+	private VoicePreferenceService voicePreferences;
+	@org.springframework.beans.factory.annotation.Autowired
+	private DocumentSummaryService documentSummaryService;
 
 	private static final Logger log = LoggerFactory.getLogger(IlinkChatRunner.class);
 	private static final int MAX_SEEN_MESSAGE_IDS = 500;
 	private static final String RESET_REPLY = "已清除本次对话记忆，我们可以重新开始。";
-	private static final Pattern VISUAL_FOLLOW_UP = Pattern.compile(
-			"这张|这幅|这个画面|刚才(?:的|那张)?|上面(?:的|那张)?|前面(?:的|那张)?|上一张|这些图|两张图|"
-			+ "类似(?:的)?(?:图片|照片|图像)|同款|参考(?:这张|刚才|上面|前面|图片|照片|图)|"
-			+ "找不同|比较.{0,8}(?:图片|照片|图像|两张)|(?:图片|照片|图像).{0,8}(?:区别|不同)");
-
 	private final AssistantService assistantService;
 	private final IlinkSessionStore sessionStore;
 	private final WechatCommandHandler commandHandler;
@@ -59,6 +63,7 @@ public class IlinkChatRunner {
 	private final long maxMediaBytes;
 	private final long mediaBatchWindowMs;
 	private final long recentMediaTtlMs;
+	private final long recentDocumentTtlMs;
 	private final ScheduledExecutorService batchExecutor = Executors.newScheduledThreadPool(1, runnable -> {
 		Thread thread = new Thread(runnable, "ilink-media-batch");
 		thread.setDaemon(true);
@@ -66,6 +71,9 @@ public class IlinkChatRunner {
 	});
 	private final Map<String, PendingBatch> pendingBatches = new ConcurrentHashMap<>();
 	private final Map<String, RecentMedia> recentMediaByUser = new ConcurrentHashMap<>();
+	private final Map<String, RecentMedia> recentDocumentsByUser = new ConcurrentHashMap<>();
+	private final Map<String, Long> awaitingImageInstructionByUser = new ConcurrentHashMap<>();
+	private final Map<String, Long> awaitingDocumentInstructionByUser = new ConcurrentHashMap<>();
 	private final Map<String, AtomicLong> userMessageVersions = new ConcurrentHashMap<>();
 	private final long acceptMessagesAfterMs = System.currentTimeMillis() - 5_000;
 	private final Map<Long, Boolean> seenMessageIds = new LinkedHashMap<>(128, 0.75f, true) {
@@ -84,8 +92,9 @@ public class IlinkChatRunner {
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars,
 			@Value("${assistant.ilink.max-media-bytes:104857600}") long maxMediaBytes,
-			@Value("${assistant.ilink.batch-window-ms:4000}") long mediaBatchWindowMs,
-			@Value("${assistant.ilink.recent-media-ttl-seconds:45}") long recentMediaTtlSeconds) {
+			@Value("${assistant.ilink.batch-window-ms:3000}") long mediaBatchWindowMs,
+			@Value("${assistant.ilink.recent-media-ttl-seconds:600}") long recentMediaTtlSeconds,
+			@Value("${assistant.ilink.recent-document-ttl-seconds:600}") long recentDocumentTtlSeconds) {
 		this.assistantService = assistantService;
 		this.sessionStore = sessionStore;
 		this.commandHandler = commandHandler;
@@ -95,6 +104,8 @@ public class IlinkChatRunner {
 		this.maxMediaBytes = Math.max(1_048_576, maxMediaBytes);
 		this.mediaBatchWindowMs = Math.max(1_000, Math.min(20_000, mediaBatchWindowMs));
 		this.recentMediaTtlMs = TimeUnit.SECONDS.toMillis(Math.max(10, Math.min(600, recentMediaTtlSeconds)));
+		this.recentDocumentTtlMs = TimeUnit.SECONDS.toMillis(
+				Math.max(30, Math.min(3_600, recentDocumentTtlSeconds)));
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
@@ -213,6 +224,7 @@ public class IlinkChatRunner {
 		ScheduledFuture<?> previous;
 		int totalMedia;
 		boolean hasText;
+		String receiptReply = null;
 		long flushDelayMs;
 		synchronized (batch) {
 			boolean hadMedia = !batch.media.isEmpty();
@@ -224,16 +236,50 @@ public class IlinkChatRunner {
 				}
 			}
 			batch.media.addAll(media);
+			if (!batch.acknowledged && batch.question.isBlank() && !batch.media.isEmpty()) {
+				boolean onlyImages = batch.media.stream().allMatch(item -> item.type() == MediaType.IMAGE);
+				boolean onlyDocuments = batch.media.stream().allMatch(item -> item.type() == MediaType.DOCUMENT);
+				if (onlyImages) {
+					batch.acknowledged = true;
+					awaitingImageInstructionByUser.put(userId, System.currentTimeMillis());
+					awaitingDocumentInstructionByUser.remove(userId);
+					receiptReply = batch.media.size() > 1
+							? "我已经接收到你的图片了。你想让我比较、分析还是修改这些图片呢？如果暂时不回复，我会在 3 秒后自动识别。"
+							: "我已经接收到你的图片了。你想让我做什么呢？如果暂时不回复，我会在 3 秒后自动识别。";
+				} else if (onlyDocuments) {
+					batch.acknowledged = true;
+					awaitingDocumentInstructionByUser.put(userId, System.currentTimeMillis());
+					awaitingImageInstructionByUser.remove(userId);
+					receiptReply = batch.media.size() > 1
+							? "我已经接收到你的文件了。你想让我做什么呢？如果暂时不回复，我会在 3 秒后自动总结。"
+							: "我已经接收到你的文件了。你想让我做什么呢？如果暂时不回复，我会在 3 秒后自动总结。";
+				}
+			}
 			batch.messageVersion = messageVersion;
+			if (batch.acknowledged && batch.question.isBlank()) {
+				if (batch.media.stream().allMatch(item -> item.type() == MediaType.IMAGE)) {
+					awaitingImageInstructionByUser.put(userId, messageVersion);
+				} else if (batch.media.stream().allMatch(item -> item.type() == MediaType.DOCUMENT)) {
+					awaitingDocumentInstructionByUser.put(userId, messageVersion);
+				}
+			}
 			totalMedia = batch.media.size();
 			hasText = !batch.question.isBlank();
 			flushDelayMs = !media.isEmpty() || hadMedia ? mediaBatchWindowMs : 700L;
-			if (hadMedia && !media.isEmpty() && !question.isBlank()) {
+			if (hadMedia && !question.isBlank()) {
 				flushDelayMs = Math.min(flushDelayMs, 900L);
 			}
-			if (!batch.media.isEmpty()) {
+			List<MediaContent> images = batch.media.stream()
+					.filter(item -> item.type() == MediaType.IMAGE).toList();
+			if (!images.isEmpty()) {
 				recentMediaByUser.put(userId,
-						new RecentMedia(List.copyOf(batch.media), System.currentTimeMillis()));
+						new RecentMedia(images, System.currentTimeMillis()));
+			}
+			List<MediaContent> documents = batch.media.stream()
+					.filter(item -> item.type() == MediaType.DOCUMENT).toList();
+			if (!documents.isEmpty()) {
+				recentDocumentsByUser.put(userId,
+						new RecentMedia(documents, System.currentTimeMillis()));
 			}
 			previous = batch.flushTask;
 			batch.flushTask = batchExecutor.schedule(() -> flushQuestion(userId, batch),
@@ -242,8 +288,11 @@ public class IlinkChatRunner {
 		if (previous != null) {
 			previous.cancel(false);
 		}
+		if (receiptReply != null) {
+			sendReceiptReply(userId, receiptReply);
+		}
 		log.info("已暂存用户消息，等待 {} 毫秒收集同一轮文本和媒体：用户={}，本批媒体总数={}，已有文字={}",
-				mediaBatchWindowMs, userId, totalMedia, hasText);
+				flushDelayMs, userId, totalMedia, hasText);
 	}
 
 	private void flushQuestion(String userId, PendingBatch batch) {
@@ -256,11 +305,47 @@ public class IlinkChatRunner {
 			messageVersion = batch.messageVersion;
 			pendingBatches.remove(userId, batch);
 		}
-		if (media.isEmpty() && isVisualFollowUp(question)) {
+		boolean onlyDocuments = !media.isEmpty()
+				&& media.stream().allMatch(item -> item.type() == MediaType.DOCUMENT);
+		boolean onlyImages = !media.isEmpty()
+				&& media.stream().allMatch(item -> item.type() == MediaType.IMAGE);
+		boolean defaultMediaTask = question.isBlank() && (onlyDocuments || onlyImages);
+		if (defaultMediaTask) {
+			question = onlyDocuments
+					? "用户已经成功上传了这个文件。请直接总结内容，保留关键结论、重要数字、日期和待办事项。"
+					: "用户已经成功上传了图片。请直接识别并自然描述图片内容，同时留意画面中的文字和重要细节。";
+			log.info("等待窗口结束，开始执行默认{}任务：用户={}，附件数量={}",
+					onlyDocuments ? "文件总结" : "图片识别", userId, media.size());
+		}
+		if (media.isEmpty() && !question.startsWith("/")) {
+			if (awaitingDocumentInstructionByUser.remove(userId) != null) {
+				List<MediaContent> recentDocuments = recentDocuments(userId);
+				if (!recentDocuments.isEmpty()) {
+					media = recentDocuments;
+					log.info("已将下一条用户需求与待处理文件合并：用户={}，文件数量={}", userId, media.size());
+				}
+			} else if (awaitingImageInstructionByUser.remove(userId) != null) {
+				List<MediaContent> recentImages = recentMedia(userId);
+				if (!recentImages.isEmpty()) {
+					media = recentImages;
+					log.info("已将下一条用户需求与待处理图片合并：用户={}，图片数量={}", userId, media.size());
+				}
+			}
+		}
+		if (!defaultMediaTask && onlyDocuments && !question.isBlank()) awaitingDocumentInstructionByUser.remove(userId);
+		if (!defaultMediaTask && onlyImages && !question.isBlank()) awaitingImageInstructionByUser.remove(userId);
+		if (media.isEmpty() && ImageReplyPolicy.referencesUploadedImage(question)) {
 			List<MediaContent> recentMedia = recentMedia(userId);
 			if (!recentMedia.isEmpty()) {
 				media = recentMedia;
 				log.info("文字消息引用了近期媒体，已自动合并：用户={}，媒体数量={}", userId, media.size());
+			}
+		}
+		if (media.isEmpty() && DocumentReplyPolicy.referencesUploadedFile(question)) {
+			List<MediaContent> recentDocuments = recentDocuments(userId);
+			if (!recentDocuments.isEmpty()) {
+				media = recentDocuments;
+				log.info("文字消息引用了近期上传文件，已自动合并：用户={}，文件数量={}", userId, media.size());
 			}
 		}
 		try {
@@ -269,6 +354,20 @@ public class IlinkChatRunner {
 		} catch (InterruptedException exception) {
 			Thread.currentThread().interrupt();
 			log.warn("批量消息处理被中断：用户={}", userId);
+		} finally {
+			if (defaultMediaTask) {
+				awaitingImageInstructionByUser.remove(userId, messageVersion);
+				awaitingDocumentInstructionByUser.remove(userId, messageVersion);
+			}
+		}
+	}
+
+	private void sendReceiptReply(String userId, String reply) {
+		try {
+			client.sendText(userId, reply);
+			log.info("已发送附件接收提示：用户={}", userId);
+		} catch (IOException | RuntimeException exception) {
+			log.warn("附件接收提示发送失败，仍将继续处理附件：用户={}，原因={}", userId, exception.getMessage());
 		}
 	}
 
@@ -284,8 +383,14 @@ public class IlinkChatRunner {
 		return recent.media();
 	}
 
-	private static boolean isVisualFollowUp(String question) {
-		return question != null && !question.isBlank() && VISUAL_FOLLOW_UP.matcher(question).find();
+	private List<MediaContent> recentDocuments(String userId) {
+		RecentMedia recent = recentDocumentsByUser.get(userId);
+		if (recent == null) return List.of();
+		if (System.currentTimeMillis() - recent.savedAtMs() > recentDocumentTtlMs) {
+			recentDocumentsByUser.remove(userId, recent);
+			return List.of();
+		}
+		return recent.media();
 	}
 
 	private boolean isNewUserMessage(WeixinMessage message) {
@@ -322,17 +427,52 @@ public class IlinkChatRunner {
 		try {
 			String answer;
 			byte[] synthesizedAudio = null;
+			GeneratedDocument generatedDocument = null;
+			boolean awaitingDocumentInstruction = false;
+			boolean awaitingImageInstruction = false;
 			AssistantReply assistantReply = null;
 			String commandReply = media.isEmpty() ? commandHandler.handle(question) : null;
+			String voiceCommandReply = handleVoiceCommand(userId, question, media);
 			String textToSynthesize = synthesisText(question, media);
-			if (textToSynthesize != null) {
-				synthesizedAudio = audioService.synthesize(textToSynthesize);
+			if (!media.isEmpty() && media.get(0).type() == MediaType.DOCUMENT) {
+				if (question == null || question.isBlank()) {
+					awaitingDocumentInstruction = true;
+					answer = "文件已收到，请告诉我需要总结、分析、翻译，还是整理成文件。";
+					log.info("文件已缓存，等待用户补充处理需求");
+				} else {
+					GeneratedDocument documentResult = documentSummaryService.summarize(media.get(0), question);
+					boolean returnFile = DocumentReplyPolicy.shouldReturnFile(
+							question, documentResult.summary(), maxReplyChars);
+					log.info("文件处理完成：用户指令={}，总结字数={}，返回方式={}",
+							question, documentResult.summary().length(), returnFile ? "文件" : "文字");
+					if (returnFile) {
+						generatedDocument = documentResult;
+						answer = "文件整理好了，文件如下。";
+					} else {
+						answer = documentResult.summary();
+					}
+				}
+			} else if (!media.isEmpty()
+					&& media.stream().allMatch(item -> item.type() == MediaType.IMAGE)
+					&& (question == null || question.isBlank())) {
+				awaitingImageInstruction = true;
+				answer = media.size() > 1
+						? "图片已收到，请告诉我需要比较、分析还是修改这些图片。"
+						: "图片已收到，请告诉我需要描述、分析还是修改这张图片。";
+				log.info("图片已缓存，等待用户补充处理需求：图片数量={}", media.size());
+			} else if (voiceCommandReply != null) {
+				answer = voiceCommandReply;
+			} else if (textToSynthesize != null) {
+				synthesizedAudio = audioService.synthesize(textToSynthesize, voicePreferences.current(userId).id());
 				answer = "语音合成完成，已生成 WAV 文件。";
 			} else if (commandReply != null) {
 				answer = commandReply;
 			} else if (isResetCommand(question)) {
 				assistantService.clearConversation(userId);
 				recentMediaByUser.remove(userId);
+				recentDocumentsByUser.remove(userId);
+				awaitingImageInstructionByUser.remove(userId);
+				awaitingDocumentInstructionByUser.remove(userId);
 				answer = RESET_REPLY;
 			} else if (!media.isEmpty() && media.get(0).type() == MediaType.AUDIO && "audio/silk".equals(media.get(0).mimeType())) {
 				answer = "抱歉，暂不支持微信语音气泡格式，请将音频以 WAV 或 MP3 文件发送。";
@@ -374,12 +514,15 @@ public class IlinkChatRunner {
 			}
 			boolean unsupportedVoice = !media.isEmpty() && media.get(0).type() == MediaType.AUDIO
 					&& "audio/silk".equals(media.get(0).mimeType());
-			if (synthesizedAudio == null && !unsupportedVoice) {
+			if (generatedDocument == null && synthesizedAudio == null && !unsupportedVoice
+					&& voiceCommandReply == null && !awaitingDocumentInstruction && !awaitingImageInstruction) {
 				answer = commandHandler.addWelcomeForFirstContact(userId, answer);
 			}
 			answer = safeReply(answer);
 			log.info("准备通过 iLink SDK 发送回复，字数={}，等待={}毫秒", answer.length(), targetDelayMs);
-			if (synthesizedAudio != null) {
+			if (generatedDocument != null) {
+				client.sendFile(userId, generatedDocument.bytes(), generatedDocument.fileName(), answer);
+			} else if (synthesizedAudio != null) {
 				client.sendFile(userId, synthesizedAudio, "speech.wav", answer);
 			} else if (assistantReply != null && assistantReply.image() != null) {
 				client.sendImage(userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
@@ -397,6 +540,14 @@ public class IlinkChatRunner {
 		} catch (IOException | RuntimeException exception) {
 			log.error("iLink 消息处理或回复失败，本条消息已跳过，监听继续：{}",
 					exception.getMessage(), exception);
+			try {
+				String message = exception.getMessage();
+				client.sendText(userId, safeReply(message == null || message.isBlank()
+						? "请求处理失败，请稍后重试。"
+						: "请求处理失败：" + message));
+			} catch (IOException sendException) {
+				log.error("向微信发送处理失败提示失败：{}", sendException.getMessage(), sendException);
+			}
 		} finally {
 			if (typingStarted) {
 				stopTyping(userId);
@@ -448,6 +599,13 @@ public class IlinkChatRunner {
 					validateMediaSize(bytes);
 					result.add(new MediaContent(MediaType.AUDIO, bytes, audioMimeType(fileName)));
 					log.info("已下载微信音频文件：文件名={}，字节数={}", fileName, bytes.length);
+				} else if (item.getFile_item() != null && isSupportedDocument(item.getFile_item().getFile_name())) {
+					mediaItemFound = true;
+					String fileName = item.getFile_item().getFile_name();
+					byte[] bytes = client.downloadFileFromMessageItem(item);
+					validateMediaSize(bytes);
+					result.add(new MediaContent(MediaType.DOCUMENT, bytes, documentMimeType(fileName)));
+					log.info("已下载微信文档文件：文件名={}，字节数={}", fileName, bytes.length);
 				}
 			} catch (IOException | IllegalArgumentException exception) {
 				failed = true;
@@ -616,6 +774,29 @@ public class IlinkChatRunner {
 		return "/reset".equalsIgnoreCase(value) || "清除对话".equals(value) || "重新开始".equals(value);
 	}
 
+	private static boolean isSupportedDocument(String fileName) {
+		if (fileName == null) return false;
+		String value = fileName.toLowerCase(java.util.Locale.ROOT);
+		return value.endsWith(".docx") || value.endsWith(".doc") || value.endsWith(".pdf")
+				|| value.endsWith(".txt") || value.endsWith(".md") || value.endsWith(".csv")
+				|| value.endsWith(".xlsx") || value.endsWith(".xls")
+				|| value.endsWith(".pptx") || value.endsWith(".ppt");
+	}
+
+	private static String documentMimeType(String fileName) {
+		String value = fileName.toLowerCase(java.util.Locale.ROOT);
+		if (value.endsWith(".pdf")) return "application/pdf";
+		if (value.endsWith(".txt")) return "text/plain";
+		if (value.endsWith(".md")) return "text/markdown";
+		if (value.endsWith(".csv")) return "text/csv";
+		if (value.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+		if (value.endsWith(".doc")) return "application/msword";
+		if (value.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+		if (value.endsWith(".xls")) return "application/vnd.ms-excel";
+		if (value.endsWith(".pptx")) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+		return "application/vnd.ms-powerpoint";
+	}
+
 	private static String synthesisText(String question, List<MediaContent> media) {
 		if ((media != null && !media.isEmpty()) || question == null) {
 			return null;
@@ -623,6 +804,24 @@ public class IlinkChatRunner {
 		java.util.regex.Matcher matcher = Pattern.compile("^\\s*(?:语音合成|合成语音)\\s*[：:]\\s*(.+?)\\s*$")
 				.matcher(question);
 		return matcher.matches() ? matcher.group(1) : null;
+	}
+
+	private String handleVoiceCommand(String userId, String question, List<MediaContent> media) {
+		if ((media != null && !media.isEmpty()) || question == null) return null;
+		String value = question.trim();
+		if ("音色列表".equals(value) || "/voices".equalsIgnoreCase(value)) {
+			return voicePreferences.describeAll();
+		}
+		if ("当前音色".equals(value) || "/voice".equalsIgnoreCase(value)) {
+			var current = voicePreferences.current(userId);
+			return "当前音色：" + current.name() + "（" + current.id() + "）";
+		}
+		java.util.regex.Matcher matcher = Pattern.compile("^\\s*(?:切换音色|设置音色)\\s*[：:]\\s*(.+?)\\s*$")
+				.matcher(value);
+		if (!matcher.matches()) return null;
+		var selected = voicePreferences.select(userId, matcher.group(1));
+		return selected == null ? "没有找到该音色，请发送“音色列表”查看可用音色。"
+				: "音色已切换为：" + selected.name() + "。";
 	}
 
 	private static void sleep(long millis) throws InterruptedException {
@@ -637,6 +836,7 @@ public class IlinkChatRunner {
 		private final java.util.ArrayList<MediaContent> media = new java.util.ArrayList<>();
 		private ScheduledFuture<?> flushTask;
 		private long messageVersion;
+		private boolean acknowledged;
 	}
 
 	private record RecentMedia(List<MediaContent> media, long savedAtMs) {
