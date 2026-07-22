@@ -24,6 +24,16 @@ public class AssistantService {
 	}
 
 	public AssistantReply replyToMedia(String sessionId, String question, List<MediaContent> media) {
+		boolean hasDocumentOrAudio = media != null && media.stream().anyMatch(item ->
+				item.type() == MediaContent.MediaType.DOCUMENT || item.type() == MediaContent.MediaType.AUDIO);
+		if (hasDocumentOrAudio) {
+			String request = question == null || question.isBlank() ? "请处理我刚上传的附件" : question.trim();
+			String context = "用户本轮已经上传附件。附件字节只能由工具通过 ToolContext 读取，不得声称没有收到附件。";
+			AssistantReply reply = functionCallingService.reply(sessionId, request,
+					conversationMemory.history(sessionId), context, media);
+			conversationMemory.remember(sessionId, "[用户发送了附件] " + request, reply.text());
+			return reply;
+		}
 		String mediaFacts = visualUnderstandingService.analyze(media, question);
 		String userRequest = question == null || question.isBlank()
 				? "请自然地告诉我你从刚才的图片或视频里看到了什么。"
@@ -41,7 +51,7 @@ public class AssistantService {
 				媒体内容：
 				%s
 				""".formatted(mediaFacts);
-		AssistantReply reply = functionCallingService.reply(sessionId, userRequest, List.of(), context);
+		AssistantReply reply = functionCallingService.reply(sessionId, userRequest, List.of(), context, media);
 		conversationMemory.remember(sessionId, "[用户发送了图片或视频] " + userRequest, reply.text());
 		return reply;
 	}

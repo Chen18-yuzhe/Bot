@@ -51,7 +51,8 @@ class AssistantServiceTests {
 		GeneratedImage generated = new GeneratedImage(new byte[] { 4, 5 }, "image/png", "wan.png");
 		when(visualUnderstandingService.analyze(media, question)).thenReturn("暗色史诗场景，豆包标志原本位于中间。");
 		when(functionCallingService.reply(eq("new-session"), eq(question), eq(List.of()),
-				contains("豆包标志原本位于中间"))).thenReturn(AssistantReply.image("图片生成好了 🎨", generated));
+				contains("豆包标志原本位于中间"), eq(media)))
+				.thenReturn(AssistantReply.image("图片生成好了 🎨", generated));
 
 		AssistantReply reply = assistantService.replyToMedia("new-session", question, media);
 

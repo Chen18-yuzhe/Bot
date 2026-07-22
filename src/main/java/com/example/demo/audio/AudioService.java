@@ -51,14 +51,22 @@ public class AudioService {
 
   public byte[] synthesize(String text, String selectedVoice) {
     requireKey(); if (text == null || text.isBlank()) throw new IllegalArgumentException("Text cannot be blank");
+	long startedAt = System.nanoTime();
     try {
       String effectiveVoice = selectedVoice == null || selectedVoice.isBlank() ? voice : selectedVoice;
+	  log.info("Calling DashScope TTS: model={}, voice={}, characters={}", ttsModel, effectiveVoice, text.length());
       var p = SpeechSynthesisParam.builder().apiKey(apiKey).model(ttsModel).voice(effectiveVoice)
           .format(SpeechSynthesisAudioFormat.WAV_16000HZ_MONO_16BIT).build();
       ByteBuffer b = new SpeechSynthesizer(p, null).call(text);
-      byte[] out = new byte[b.remaining()]; b.get(out); return out;
+	  byte[] out = new byte[b.remaining()]; b.get(out);
+	  log.info("DashScope TTS succeeded: bytes={}, durationMs={}", out.length,
+		  (System.nanoTime() - startedAt) / 1_000_000L);
+	  return out;
     }
-    catch (Exception e) { throw new ApplicationException(HttpStatus.BAD_GATEWAY, "Speech synthesis failed", e); }
+	catch (Exception e) {
+	  log.error("DashScope TTS failed: model={}, characters={}, error={}", ttsModel, text.length(), e.getMessage(), e);
+	  throw new ApplicationException(HttpStatus.BAD_GATEWAY, "Speech synthesis failed", e);
+	}
   }
   private void requireKey() { if (apiKey == null || apiKey.isBlank()) throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE, "Configure DASHSCOPE_API_KEY first"); }
   private void configureEndpoint() {

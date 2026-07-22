@@ -13,6 +13,8 @@ public final class DocumentReplyPolicy {
 		if (instruction == null || instruction.isBlank()) return false;
 		String value = normalize(instruction);
 		return isFileRequested(value)
+				|| value.matches(".*(?:加入|添加|保存|导入|收录)(?:到|进|至)?(?:我的|个人)?知识库.*")
+				|| value.matches(".*(?:知识库).{0,8}(?:加入|添加|保存|导入|收录).*")
 				|| value.matches("^(?:请|帮我|麻烦)?(?:分析|总结|概括|整理|查看|解读|提取重点|列出重点|生成摘要)(?:一下|下|这个|这份)?(?:吧|。|！|!)?$")
 				|| value.matches("^(?:请|帮我|麻烦)?翻译(?:成|为)?(?:英文|英语|中文|汉语)?(?:一下|下)?(?:吧|。|！|!)?$")
 				|| value.matches(".*(?:这个|这份|刚才|上面|前面|之前|上传|原来).{0,6}(?:文件|文档|表格|报告|ppt|pdf|word).*")

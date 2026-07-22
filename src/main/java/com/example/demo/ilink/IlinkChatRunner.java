@@ -11,7 +11,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,12 +25,11 @@ import com.example.demo.chat.AssistantReply;
 import com.example.demo.chat.ImageReplyPolicy;
 import com.example.demo.chat.MediaContent;
 import com.example.demo.chat.MediaContent.MediaType;
-import com.example.demo.audio.AudioService;
-import com.example.demo.audio.VoicePreferenceService;
+import com.example.demo.audio.GeneratedAudio;
 import com.example.demo.ApplicationException;
-import com.example.demo.document.DocumentSummaryService;
 import com.example.demo.document.GeneratedDocument;
 import com.example.demo.document.DocumentReplyPolicy;
+import com.example.demo.reminder.ReminderService;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.ILinkClientBuilder;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
@@ -44,19 +42,13 @@ import jakarta.annotation.PreDestroy;
 @Component
 @ConditionalOnProperty(name = "assistant.ilink-enabled", havingValue = "true")
 public class IlinkChatRunner {
-	@org.springframework.beans.factory.annotation.Autowired
-	private AudioService audioService;
-	@org.springframework.beans.factory.annotation.Autowired
-	private VoicePreferenceService voicePreferences;
-	@org.springframework.beans.factory.annotation.Autowired
-	private DocumentSummaryService documentSummaryService;
-
 	private static final Logger log = LoggerFactory.getLogger(IlinkChatRunner.class);
 	private static final int MAX_SEEN_MESSAGE_IDS = 500;
 	private static final String RESET_REPLY = "已清除本次对话记忆，我们可以重新开始。";
 	private final AssistantService assistantService;
 	private final IlinkSessionStore sessionStore;
 	private final WechatCommandHandler commandHandler;
+	private final ReminderService reminderService;
 	private final long minReplyDelayMs;
 	private final long maxReplyDelayMs;
 	private final int maxReplyChars;
@@ -87,7 +79,7 @@ public class IlinkChatRunner {
 	private volatile Thread worker;
 
 	public IlinkChatRunner(AssistantService assistantService, IlinkSessionStore sessionStore,
-			WechatCommandHandler commandHandler,
+			WechatCommandHandler commandHandler, ReminderService reminderService,
 			@Value("${assistant.ilink.min-reply-delay-ms:13000}") long minReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars,
@@ -98,6 +90,7 @@ public class IlinkChatRunner {
 		this.assistantService = assistantService;
 		this.sessionStore = sessionStore;
 		this.commandHandler = commandHandler;
+		this.reminderService = reminderService;
 		this.minReplyDelayMs = Math.max(0, minReplyDelayMs);
 		this.maxReplyDelayMs = Math.max(this.minReplyDelayMs, maxReplyDelayMs);
 		this.maxReplyChars = Math.max(100, maxReplyChars);
@@ -110,11 +103,13 @@ public class IlinkChatRunner {
 
 	@EventListener(ApplicationReadyEvent.class)
 	public void start() {
+		reminderService.setNotifier(this::deliverReminder);
 		worker = Thread.ofPlatform().name("ilink-chat").start(this::runSafely);
 	}
 
 	@PreDestroy
 	public void stop() {
+		reminderService.setNotifier(null);
 		batchExecutor.shutdownNow();
 		Thread currentWorker = worker;
 		if (currentWorker != null) {
@@ -426,46 +421,11 @@ public class IlinkChatRunner {
 		boolean typingStarted = startTyping(userId);
 		try {
 			String answer;
-			byte[] synthesizedAudio = null;
 			GeneratedDocument generatedDocument = null;
-			boolean awaitingDocumentInstruction = false;
-			boolean awaitingImageInstruction = false;
+			GeneratedAudio generatedAudio = null;
 			AssistantReply assistantReply = null;
 			String commandReply = media.isEmpty() ? commandHandler.handle(question) : null;
-			String voiceCommandReply = handleVoiceCommand(userId, question, media);
-			String textToSynthesize = synthesisText(question, media);
-			if (!media.isEmpty() && media.get(0).type() == MediaType.DOCUMENT) {
-				if (question == null || question.isBlank()) {
-					awaitingDocumentInstruction = true;
-					answer = "文件已收到，请告诉我需要总结、分析、翻译，还是整理成文件。";
-					log.info("文件已缓存，等待用户补充处理需求");
-				} else {
-					GeneratedDocument documentResult = documentSummaryService.summarize(media.get(0), question);
-					boolean returnFile = DocumentReplyPolicy.shouldReturnFile(
-							question, documentResult.summary(), maxReplyChars);
-					log.info("文件处理完成：用户指令={}，总结字数={}，返回方式={}",
-							question, documentResult.summary().length(), returnFile ? "文件" : "文字");
-					if (returnFile) {
-						generatedDocument = documentResult;
-						answer = "文件整理好了，文件如下。";
-					} else {
-						answer = documentResult.summary();
-					}
-				}
-			} else if (!media.isEmpty()
-					&& media.stream().allMatch(item -> item.type() == MediaType.IMAGE)
-					&& (question == null || question.isBlank())) {
-				awaitingImageInstruction = true;
-				answer = media.size() > 1
-						? "图片已收到，请告诉我需要比较、分析还是修改这些图片。"
-						: "图片已收到，请告诉我需要描述、分析还是修改这张图片。";
-				log.info("图片已缓存，等待用户补充处理需求：图片数量={}", media.size());
-			} else if (voiceCommandReply != null) {
-				answer = voiceCommandReply;
-			} else if (textToSynthesize != null) {
-				synthesizedAudio = audioService.synthesize(textToSynthesize, voicePreferences.current(userId).id());
-				answer = "语音合成完成，已生成 WAV 文件。";
-			} else if (commandReply != null) {
+			if (commandReply != null) {
 				answer = commandReply;
 			} else if (isResetCommand(question)) {
 				assistantService.clearConversation(userId);
@@ -474,28 +434,19 @@ public class IlinkChatRunner {
 				awaitingImageInstructionByUser.remove(userId);
 				awaitingDocumentInstructionByUser.remove(userId);
 				answer = RESET_REPLY;
-			} else if (!media.isEmpty() && media.get(0).type() == MediaType.AUDIO && "audio/silk".equals(media.get(0).mimeType())) {
+			} else if (!media.isEmpty() && media.get(0).type() == MediaType.AUDIO
+					&& "audio/silk".equals(media.get(0).mimeType())) {
 				answer = "抱歉，暂不支持微信语音气泡格式，请将音频以 WAV 或 MP3 文件发送。";
-			} else if (!media.isEmpty() && media.get(0).type() == MediaType.AUDIO) {
-				String transcript;
-				if (question == null || question.isBlank()) {
-					java.nio.file.Path audioPath = writeTempAudio(media.get(0));
-					try {
-						transcript = audioService.recognize(audioPath.toFile());
-					} finally {
-						java.nio.file.Files.deleteIfExists(audioPath);
-					}
-				} else {
-					transcript = question;
-				}
-				log.info("语音识别文本：{}", transcript);
-				answer = assistantService.chat(userId, transcript);
 			} else if (!media.isEmpty()) {
 				assistantReply = assistantService.replyToMedia(userId, question, media);
 				answer = assistantReply.text();
 			} else {
 				assistantReply = assistantService.reply(userId, question);
 				answer = assistantReply.text();
+			}
+			if (assistantReply != null) {
+				generatedDocument = assistantReply.document();
+				generatedAudio = assistantReply.audio();
 			}
 			answer = safeReply(answer);
 			if (isSuperseded(userId, messageVersion)) {
@@ -514,16 +465,15 @@ public class IlinkChatRunner {
 			}
 			boolean unsupportedVoice = !media.isEmpty() && media.get(0).type() == MediaType.AUDIO
 					&& "audio/silk".equals(media.get(0).mimeType());
-			if (generatedDocument == null && synthesizedAudio == null && !unsupportedVoice
-					&& voiceCommandReply == null && !awaitingDocumentInstruction && !awaitingImageInstruction) {
+			if (generatedDocument == null && generatedAudio == null && !unsupportedVoice) {
 				answer = commandHandler.addWelcomeForFirstContact(userId, answer);
 			}
 			answer = safeReply(answer);
 			log.info("准备通过 iLink SDK 发送回复，字数={}，等待={}毫秒", answer.length(), targetDelayMs);
 			if (generatedDocument != null) {
 				client.sendFile(userId, generatedDocument.bytes(), generatedDocument.fileName(), answer);
-			} else if (synthesizedAudio != null) {
-				client.sendFile(userId, synthesizedAudio, "speech.wav", answer);
+			} else if (generatedAudio != null) {
+				client.sendFile(userId, generatedAudio.bytes(), generatedAudio.fileName(), answer);
 			} else if (assistantReply != null && assistantReply.image() != null) {
 				client.sendImage(userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
 			} else {
@@ -552,6 +502,19 @@ public class IlinkChatRunner {
 			if (typingStarted) {
 				stopTyping(userId);
 			}
+		}
+	}
+
+	private boolean deliverReminder(ReminderService.Reminder reminder) {
+		ILinkClient current = client;
+		if (current == null || !current.isLoggedIn()) return false;
+		try {
+			current.sendText(reminder.userId(), "⏰ 提醒：" + reminder.content());
+			log.info("已通过 iLink 发送定时提醒：id={}，用户={}", reminder.id(), reminder.userId());
+			return true;
+		} catch (IOException | RuntimeException error) {
+			log.warn("通过 iLink 发送定时提醒失败：id={}，原因={}", reminder.id(), error.getMessage());
+			return false;
 		}
 	}
 
@@ -597,14 +560,14 @@ public class IlinkChatRunner {
 					String fileName = item.getFile_item().getFile_name();
 					byte[] bytes = client.downloadFileFromMessageItem(item);
 					validateMediaSize(bytes);
-					result.add(new MediaContent(MediaType.AUDIO, bytes, audioMimeType(fileName)));
+					result.add(new MediaContent(MediaType.AUDIO, bytes, audioMimeType(fileName), fileName));
 					log.info("已下载微信音频文件：文件名={}，字节数={}", fileName, bytes.length);
 				} else if (item.getFile_item() != null && isSupportedDocument(item.getFile_item().getFile_name())) {
 					mediaItemFound = true;
 					String fileName = item.getFile_item().getFile_name();
 					byte[] bytes = client.downloadFileFromMessageItem(item);
 					validateMediaSize(bytes);
-					result.add(new MediaContent(MediaType.DOCUMENT, bytes, documentMimeType(fileName)));
+					result.add(new MediaContent(MediaType.DOCUMENT, bytes, documentMimeType(fileName), fileName));
 					log.info("已下载微信文档文件：文件名={}，字节数={}", fileName, bytes.length);
 				}
 			} catch (IOException | IllegalArgumentException exception) {
@@ -613,12 +576,6 @@ public class IlinkChatRunner {
 			}
 		}
 		return new MediaExtraction(result, mediaItemFound, failed);
-	}
-
-	private java.nio.file.Path writeTempAudio(MediaContent media) throws IOException {
-		java.nio.file.Path path = java.nio.file.Files.createTempFile("wechat-audio-", audioExtension(media.mimeType()));
-		java.nio.file.Files.write(path, media.data());
-		return path;
 	}
 
 	private static boolean isAudioFile(String fileName) {
@@ -640,21 +597,6 @@ public class IlinkChatRunner {
 		if (value.endsWith(".aac")) return "audio/aac";
 		if (value.endsWith(".amr")) return "audio/amr";
 		return "audio/x-ms-wma";
-	}
-
-	private static String audioExtension(String mimeType) {
-		return switch (mimeType) {
-			case "audio/wav" -> ".wav";
-			case "audio/mpeg" -> ".mp3";
-			case "audio/mp4" -> ".m4a";
-			case "audio/flac" -> ".flac";
-			case "audio/ogg" -> ".ogg";
-			case "audio/opus" -> ".opus";
-			case "audio/aac" -> ".aac";
-			case "audio/amr" -> ".amr";
-			case "audio/x-ms-wma" -> ".wma";
-			default -> ".silk";
-		};
 	}
 
 	private void sendMediaFailureReply(String userId) throws InterruptedException {
@@ -795,33 +737,6 @@ public class IlinkChatRunner {
 		if (value.endsWith(".xls")) return "application/vnd.ms-excel";
 		if (value.endsWith(".pptx")) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 		return "application/vnd.ms-powerpoint";
-	}
-
-	private static String synthesisText(String question, List<MediaContent> media) {
-		if ((media != null && !media.isEmpty()) || question == null) {
-			return null;
-		}
-		java.util.regex.Matcher matcher = Pattern.compile("^\\s*(?:语音合成|合成语音)\\s*[：:]\\s*(.+?)\\s*$")
-				.matcher(question);
-		return matcher.matches() ? matcher.group(1) : null;
-	}
-
-	private String handleVoiceCommand(String userId, String question, List<MediaContent> media) {
-		if ((media != null && !media.isEmpty()) || question == null) return null;
-		String value = question.trim();
-		if ("音色列表".equals(value) || "/voices".equalsIgnoreCase(value)) {
-			return voicePreferences.describeAll();
-		}
-		if ("当前音色".equals(value) || "/voice".equalsIgnoreCase(value)) {
-			var current = voicePreferences.current(userId);
-			return "当前音色：" + current.name() + "（" + current.id() + "）";
-		}
-		java.util.regex.Matcher matcher = Pattern.compile("^\\s*(?:切换音色|设置音色)\\s*[：:]\\s*(.+?)\\s*$")
-				.matcher(value);
-		if (!matcher.matches()) return null;
-		var selected = voicePreferences.select(userId, matcher.group(1));
-		return selected == null ? "没有找到该音色，请发送“音色列表”查看可用音色。"
-				: "音色已切换为：" + selected.name() + "。";
 	}
 
 	private static void sleep(long millis) throws InterruptedException {

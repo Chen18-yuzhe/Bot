@@ -1,37 +1,24 @@
-# ykd-s301-2
+# 微信 AI 助手
 
-#### 介绍
-优课达夏令营学习使用
+基于 Spring Boot、微信 iLink、阿里云百炼 DashScope Function Calling、和风天气与 Redis 构建的多模态微信 AI 助手。
 
-#### 软件架构
-软件架构说明
+主要功能包括多轮对话、联网搜索、个人知识库、天气查询、图片理解与编辑、文生图、文档处理、语音识别与合成、定时提醒、运行监控和 24 小时 Redis 会话记忆。
 
+## 文档
 
-#### 安装教程
+- [完整技术文档](TECHNICAL-DOCUMENTATION.md)
+- [Function Calling 开发规范](FUNCTION-CALLING.md)
+- [Redis 对话记忆](REDIS-MEMORY.md)
+- [微信 iLink 接入说明](ILINK-README.md)
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+## 构建
 
-#### 使用说明
+```powershell
+.\mvnw.cmd clean test package
+```
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+可执行 JAR 位于：
 
-#### 参与贡献
-
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
-
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+```text
+target/demo-0.0.1-SNAPSHOT-boot.jar
+```

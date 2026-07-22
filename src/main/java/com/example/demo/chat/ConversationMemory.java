@@ -3,6 +3,8 @@ package com.example.demo.chat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -14,11 +16,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.HexFormat;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,6 +40,10 @@ public class ConversationMemory {
 	private final int summaryMaxChars;
 	private final Path storageFile;
 	private final ObjectMapper objectMapper;
+	private final StringRedisTemplate redis;
+	private final boolean redisEnabled;
+	private final String redisKeyPrefix;
+	private final AtomicBoolean redisWarningLogged = new AtomicBoolean();
 	private final AtomicBoolean saveScheduled = new AtomicBoolean();
 	private final ScheduledExecutorService persistenceExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
 		Thread thread = new Thread(r, "conversation-store");
@@ -49,7 +58,16 @@ public class ConversationMemory {
 			@Value("${assistant.conversation.max-message-chars:4000}") int maxMessageChars,
 			@Value("${assistant.conversation.summary-max-chars:6000}") int summaryMaxChars,
 			@Value("${assistant.conversation.storage-file:}") String storageFile,
-			ObjectMapper objectMapper) {
+			@Value("${assistant.conversation.redis-enabled:true}") boolean redisEnabled,
+			@Value("${assistant.conversation.redis-key-prefix:demo-assistant:conversation:}") String redisKeyPrefix,
+			ObjectMapper objectMapper, ObjectProvider<StringRedisTemplate> redisProvider) {
+		this(maxTurns, ttlMinutes, maxSessions, maxMessageChars, summaryMaxChars, storageFile,
+				objectMapper, redisEnabled, redisKeyPrefix, redisProvider.getIfAvailable());
+	}
+
+	private ConversationMemory(int maxTurns, long ttlMinutes, int maxSessions, int maxMessageChars,
+			int summaryMaxChars, String storageFile, ObjectMapper objectMapper, boolean redisEnabled,
+			String redisKeyPrefix, StringRedisTemplate redis) {
 		this.maxTurns = Math.max(1, maxTurns);
 		this.ttlMillis = Duration.ofMinutes(Math.max(1, ttlMinutes)).toMillis();
 		this.maxSessions = Math.max(10, maxSessions);
@@ -57,15 +75,48 @@ public class ConversationMemory {
 		this.summaryMaxChars = Math.max(500, summaryMaxChars);
 		this.storageFile = storageFile == null || storageFile.isBlank() ? null : Path.of(storageFile).toAbsolutePath();
 		this.objectMapper = objectMapper;
+		this.redis = redis;
+		this.redisEnabled = redisEnabled && redis != null;
+		this.redisKeyPrefix = redisKeyPrefix == null || redisKeyPrefix.isBlank()
+				? "demo-assistant:conversation:" : redisKeyPrefix.trim();
 		load();
+		migrateLocalSessionsToRedis();
 	}
 
 	ConversationMemory(int maxTurns, long ttlMinutes) {
-		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", new ObjectMapper());
+		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", new ObjectMapper(), false, "", null);
+	}
+
+	ConversationMemory(int maxTurns, long ttlMinutes, int maxSessions, int maxMessageChars,
+			int summaryMaxChars, String storageFile, ObjectMapper objectMapper) {
+		this(maxTurns, ttlMinutes, maxSessions, maxMessageChars, summaryMaxChars, storageFile,
+				objectMapper, false, "", null);
+	}
+
+	ConversationMemory(int maxTurns, long ttlMinutes, ObjectMapper objectMapper,
+			StringRedisTemplate redis, String redisKeyPrefix) {
+		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", objectMapper, true, redisKeyPrefix, redis);
 	}
 
 	public List<ConversationTurn> history(String sessionId) {
 		if (sessionId == null || sessionId.isBlank()) return List.of();
+		RedisRead redisRead = readRedis(sessionId);
+		if (redisRead.available()) {
+			if (redisRead.memory() == null) {
+				SessionMemory local = sessions.get(sessionId);
+				if (local == null || expired(local)) {
+					sessions.remove(sessionId);
+					return List.of();
+				}
+				writeRedis(sessionId, local);
+			} else {
+				SessionMemory local = sessions.get(sessionId);
+				SessionMemory newest = local != null && local.lastAccessAt > redisRead.memory().lastAccessAt
+						? local : redisRead.memory();
+				sessions.put(sessionId, newest);
+				if (newest == local) writeRedis(sessionId, newest);
+			}
+		}
 		SessionMemory memory = sessions.get(sessionId);
 		if (memory == null) return List.of();
 		synchronized (memory) {
@@ -86,7 +137,13 @@ public class ConversationMemory {
 
 	public void remember(String sessionId, String question, String answer) {
 		if (sessionId == null || sessionId.isBlank() || question == null || answer == null) return;
-		SessionMemory memory = sessions.computeIfAbsent(sessionId, ignored -> new SessionMemory());
+		SessionMemory memory = sessions.get(sessionId);
+		if (memory == null) {
+			RedisRead redisRead = readRedis(sessionId);
+			SessionMemory candidate = redisRead.memory() == null ? new SessionMemory() : redisRead.memory();
+			SessionMemory existing = sessions.putIfAbsent(sessionId, candidate);
+			memory = existing == null ? candidate : existing;
+		}
 		synchronized (memory) {
 			if (expired(memory)) memory.turns.clear();
 			memory.turns.addLast(new ConversationTurn(limit(question), limit(answer)));
@@ -97,11 +154,106 @@ public class ConversationMemory {
 			memory.lastAccessAt = System.currentTimeMillis();
 		}
 		prune();
+		writeRedis(sessionId, memory);
 		scheduleSave();
 	}
 
 	public void clear(String sessionId) {
-		if (sessionId != null && sessions.remove(sessionId) != null) scheduleSave();
+		if (sessionId == null || sessionId.isBlank()) return;
+		sessions.remove(sessionId);
+		deleteRedis(sessionId);
+		scheduleSave();
+	}
+
+	public int activeSessionCount() {
+		prune();
+		return sessions.size();
+	}
+
+	private RedisRead readRedis(String sessionId) {
+		if (!redisEnabled) return new RedisRead(false, null);
+		try {
+			String key = redisKey(sessionId);
+			String json = redis.opsForValue().get(key);
+			if (json == null) return new RedisRead(true, null);
+			StoredSession stored = objectMapper.readValue(json, StoredSession.class);
+			SessionMemory memory = fromStored(stored);
+			redis.expire(key, Duration.ofMillis(ttlMillis));
+			redisWarningLogged.set(false);
+			return new RedisRead(true, memory);
+		} catch (Exception error) {
+			warnRedis("读取", error);
+			return new RedisRead(false, null);
+		}
+	}
+
+	private void writeRedis(String sessionId, SessionMemory memory) {
+		if (!redisEnabled) return;
+		try {
+			StoredSession stored;
+			synchronized (memory) {
+				stored = new StoredSession(sessionId, memory.lastAccessAt, memory.summary,
+						new ArrayList<>(memory.turns));
+			}
+			redis.opsForValue().set(redisKey(sessionId), objectMapper.writeValueAsString(stored),
+					Duration.ofMillis(ttlMillis));
+			redisWarningLogged.set(false);
+		} catch (Exception error) {
+			warnRedis("写入", error);
+		}
+	}
+
+	private void deleteRedis(String sessionId) {
+		if (!redisEnabled) return;
+		try {
+			redis.delete(redisKey(sessionId));
+			redisWarningLogged.set(false);
+		} catch (Exception error) {
+			warnRedis("删除", error);
+		}
+	}
+
+	private String redisKey(String sessionId) {
+		try {
+			byte[] digest = MessageDigest.getInstance("SHA-256")
+					.digest(sessionId.getBytes(StandardCharsets.UTF_8));
+			return redisKeyPrefix + HexFormat.of().formatHex(digest);
+		} catch (Exception impossible) {
+			throw new IllegalStateException("无法生成 Redis 会话键", impossible);
+		}
+	}
+
+	private SessionMemory fromStored(StoredSession stored) {
+		SessionMemory memory = new SessionMemory();
+		memory.summary = stored.summary() == null ? "" : stored.summary();
+		List<ConversationTurn> turns = stored.turns() == null ? List.of() : stored.turns();
+		turns.stream().skip(Math.max(0, turns.size() - maxTurns)).forEach(memory.turns::addLast);
+		memory.lastAccessAt = stored.lastAccessAt();
+		return memory;
+	}
+
+	private void warnRedis(String operation, Exception error) {
+		if (redisWarningLogged.compareAndSet(false, true)) {
+			log.warn("Redis 对话存储{}失败，暂时降级到本地存储：{}", operation, error.getMessage());
+		}
+	}
+
+	private void migrateLocalSessionsToRedis() {
+		if (!redisEnabled || sessions.isEmpty()) return;
+		int migrated = 0;
+		for (Map.Entry<String, SessionMemory> entry : sessions.entrySet()) {
+			try {
+				String key = redisKey(entry.getKey());
+				if (Boolean.FALSE.equals(redis.hasKey(key))) {
+					writeRedis(entry.getKey(), entry.getValue());
+					migrated++;
+				}
+			} catch (Exception error) {
+				warnRedis("迁移", error);
+				break;
+			}
+		}
+		if (migrated > 0) log.info("已将 {} 个本地对话会话迁移到 Redis", migrated);
 	}
 
 	private String limit(String value) {
@@ -193,4 +345,5 @@ public class ConversationMemory {
 
 	private record StoredState(List<StoredSession> sessions) { }
 	private record StoredSession(String sessionId, long lastAccessAt, String summary, List<ConversationTurn> turns) { }
+	private record RedisRead(boolean available, SessionMemory memory) { }
 }

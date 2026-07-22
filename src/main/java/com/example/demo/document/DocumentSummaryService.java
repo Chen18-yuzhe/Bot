@@ -19,12 +19,15 @@ import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.example.demo.chat.MediaContent;
 import com.example.demo.chat.QwenService;
 
 @Service
 public class DocumentSummaryService {
+	private static final Logger log = LoggerFactory.getLogger(DocumentSummaryService.class);
 	private static final int MAX_SOURCE_CHARS = 50_000;
 	private final QwenService qwenService;
 
@@ -33,19 +36,29 @@ public class DocumentSummaryService {
 	}
 
 	public GeneratedDocument summarize(MediaContent media, String instruction) {
-		String source = extract(media);
-		if (source.isBlank()) throw new IllegalArgumentException("文件中没有可读取的文字内容");
-		String request = instruction == null || instruction.isBlank() ? "请总结这份文件" : instruction.trim();
-		String context = """
-				以下是用户上传文件中提取出的文字内容。请严格依据原文处理，不要编造；保留关键结论、事实、数字、日期和待办事项。
-				文件内容：
-				%s
-				""".formatted(source);
-		String summary = qwenService.chatWithContext(request, context);
-		return new GeneratedDocument(createDocx(summary), "summary.docx", summary);
+		long startedAt = System.nanoTime();
+		try {
+			String source = extractText(media);
+			if (source.isBlank()) throw new IllegalArgumentException("文件中没有可读取的文字内容");
+			String request = instruction == null || instruction.isBlank() ? "请总结这份文件" : instruction.trim();
+			String context = """
+					以下是用户上传文件中提取出的文字内容。请严格依据原文处理，不要编造；保留关键结论、事实、数字、日期和待办事项。
+					文件内容：
+					%s
+					""".formatted(source);
+			log.info("开始处理文档：类型={}，提取字数={}，指令字数={}", media.mimeType(), source.length(), request.length());
+			String summary = qwenService.chatWithContext(request, context);
+			GeneratedDocument result = new GeneratedDocument(createDocx(summary), "document-result.docx", summary);
+			log.info("文档处理完成：结果字数={}，文件字节={}，耗时={}毫秒", summary.length(), result.bytes().length,
+					(System.nanoTime() - startedAt) / 1_000_000L);
+			return result;
+		} catch (RuntimeException error) {
+			log.warn("文档处理失败：类型={}，原因={}", media == null ? "unknown" : media.mimeType(), error.getMessage());
+			throw error;
+		}
 	}
 
-	private String extract(MediaContent media) {
+	public String extractText(MediaContent media) {
 		try {
 			String mimeType = media.mimeType();
 			if ("application/pdf".equals(mimeType)) return limit(extractPdf(media.data()));

@@ -31,6 +31,8 @@ class DocumentReplyPolicyTests {
 		assertTrue(DocumentReplyPolicy.referencesUploadedFile("提取重点"));
 		assertTrue(DocumentReplyPolicy.referencesUploadedFile("整理成文件给我"));
 		assertTrue(DocumentReplyPolicy.referencesUploadedFile("把刚才的 PDF 翻译一下"));
+		assertTrue(DocumentReplyPolicy.referencesUploadedFile("加入我的知识库"));
+		assertTrue(DocumentReplyPolicy.referencesUploadedFile("保存到知识库"));
 		assertFalse(DocumentReplyPolicy.referencesUploadedFile("帮我写一段自我介绍"));
 	}
 }

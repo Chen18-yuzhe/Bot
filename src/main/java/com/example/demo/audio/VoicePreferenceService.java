@@ -46,6 +46,7 @@ public class VoicePreferenceService {
 		if (selected != null) {
 			preferences.put(userId, selected.id());
 			save();
+			log.info("用户音色偏好已更新：用户={}，音色={}", userId, selected.id());
 		}
 		return selected;
 	}

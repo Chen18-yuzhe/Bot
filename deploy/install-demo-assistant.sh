@@ -117,12 +117,38 @@ fi
 JAVA_BIN="$(readlink -f "${JAVA_BIN}")"
 echo "Java is ready: $(${JAVA_BIN} -version 2>&1 | head -n 1)"
 
+install_redis() {
+  if command -v redis-server >/dev/null 2>&1; then return 0; fi
+  echo "Redis is not installed. Installing Redis..."
+  if command -v dnf >/dev/null 2>&1; then dnf install -y redis
+  elif command -v yum >/dev/null 2>&1; then yum install -y redis
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server
+  else
+    echo "ERROR: No supported package manager was found for Redis."
+    return 1
+  fi
+}
+
+install_redis
+if systemctl list-unit-files redis.service >/dev/null 2>&1; then
+  systemctl enable --now redis
+elif systemctl list-unit-files redis-server.service >/dev/null 2>&1; then
+  systemctl enable --now redis-server
+else
+  echo "ERROR: Redis systemd service was not found after installation."
+  exit 1
+fi
+redis-cli ping | grep -q PONG || { echo "ERROR: Redis did not respond to PING."; exit 1; }
+echo "Redis is ready on 127.0.0.1:6379."
+
 if ! id "${APP_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${DATA_DIR}" --create-home --shell /sbin/nologin "${APP_USER}"
 fi
 
 install -d -o root -g root -m 0755 "${APP_DIR}"
-install -d -o "${APP_USER}" -g "${APP_USER}" -m 0700 "${DATA_DIR}" "${DATA_DIR}/.demo-ilink"
+install -d -o "${APP_USER}" -g "${APP_USER}" -m 0700 "${DATA_DIR}" "${DATA_DIR}/.demo-ilink" "${DATA_DIR}/knowledge"
 install -d -o root -g "${APP_USER}" -m 0750 "${ENV_DIR}"
 install -o root -g root -m 0644 "${SOURCE_JAR}" "${APP_DIR}/${APP_NAME}.jar"
 
@@ -153,9 +179,17 @@ umask 0077
   printf 'DASHSCOPE_MODEL=qwen3.7-plus\n'
   printf 'DASHSCOPE_IMAGE_MODEL=wan2.7-image-pro\n'
   printf 'DASHSCOPE_IMAGE_SIZE=2K\n'
+  printf 'DASHSCOPE_IMAGE_EDIT_MODEL=wan2.7-image-pro\n'
+  printf 'DASHSCOPE_IMAGE_EDIT_SIZE=2K\n'
   printf 'QWEATHER_API_HOST=%s\n' "${QWEATHER_API_HOST}"
   printf 'QWEATHER_API_KEY=%s\n' "${QWEATHER_API_KEY}"
   printf 'ILINK_CREDENTIALS_FILE=%s\n' "${DATA_DIR}/.demo-ilink/credentials.json"
+  printf 'REDIS_URL=redis://127.0.0.1:6379/0\n'
+  printf 'CONVERSATION_REDIS_ENABLED=true\n'
+  printf 'CONVERSATION_TTL_MINUTES=1440\n'
+  printf 'KNOWLEDGE_BASE_PATH=%s\n' "${DATA_DIR}/knowledge"
+  printf 'REMINDERS_ENABLED=true\n'
+  printf 'REMINDERS_POLL_MS=10000\n'
 } > "${ENV_FILE}"
 chown root:"${APP_USER}" "${ENV_FILE}"
 chmod 0640 "${ENV_FILE}"

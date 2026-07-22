@@ -30,9 +30,18 @@ public class AssistantToolRegistry {
 				.toList();
 	}
 
+	public ToolBase definition(String name) {
+		AssistantTool tool = require(name);
+		return ToolFunction.builder().function(tool.definition()).build();
+	}
+
 	public AssistantTool require(String name) {
 		AssistantTool tool = tools.get(name);
 		if (tool == null) throw new IllegalArgumentException("模型请求了未注册的工具：" + name);
 		return tool;
+	}
+
+	public List<String> names() {
+		return tools.keySet().stream().sorted().toList();
 	}
 }
