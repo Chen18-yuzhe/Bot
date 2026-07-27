@@ -47,6 +47,15 @@ public class ReminderService {
 	}
 
 	public Reminder create(String userId, String content, ZonedDateTime triggerAt, Recurrence recurrence) {
+		return create(userId, content, triggerAt, recurrence, null);
+	}
+
+	/**
+	 * type=null 为普通文字提醒；type="briefing" 的提醒在投递时由通知器现场生成
+	 * 内容（早报/收盘报），content 存放生成参数（如城市）。
+	 */
+	public Reminder create(String userId, String content, ZonedDateTime triggerAt, Recurrence recurrence,
+			String type) {
 		if (!enabled) throw new IllegalStateException("提醒功能未启用");
 		if (userId == null || userId.isBlank()) throw new IllegalArgumentException("无法识别提醒所属用户");
 		if (content == null || content.isBlank()) throw new IllegalArgumentException("提醒内容不能为空");
@@ -55,7 +64,7 @@ public class ReminderService {
 		}
 		Reminder reminder = new Reminder(UUID.randomUUID().toString(), userId, content.trim(),
 				triggerAt.toInstant().toEpochMilli(), recurrence == null ? Recurrence.NONE : recurrence,
-				System.currentTimeMillis(), triggerAt.toInstant().toEpochMilli());
+				System.currentTimeMillis(), triggerAt.toInstant().toEpochMilli(), type);
 		local.put(reminder.id(), reminder);
 		writeRedis(reminder, reminder.triggerAtMs());
 		log.info("提醒已创建：id={}，用户={}，触发时间={}，重复={}", reminder.id(), userId,
@@ -83,6 +92,24 @@ public class ReminderService {
 		return local.size();
 	}
 
+	/** Deletes all reminders associated with an account-scoped conversation id. */
+	public int deleteByUserIdPrefix(String sessionPrefix) {
+		if (sessionPrefix == null || sessionPrefix.isBlank()) return 0;
+		loadRedisItems();
+		List<String> ids = local.values().stream()
+				.filter(item -> item.userId().startsWith(sessionPrefix))
+				.map(Reminder::id)
+				.toList();
+		ids.forEach(id -> {
+			local.remove(id);
+			deleteRedis(id);
+		});
+		if (!ids.isEmpty()) {
+			log.info("已删除账户关联提醒：数量={}", ids.size());
+		}
+		return ids.size();
+	}
+
 	@Scheduled(fixedDelayString = "${assistant.reminders.poll-ms:10000}")
 	public void deliverDue() {
 		if (!enabled) return;
@@ -103,7 +130,8 @@ public class ReminderService {
 			if (!delivered) {
 				long retryAt = now + 60_000L;
 				Reminder retry = new Reminder(reminder.id(), reminder.userId(), reminder.content(),
-						reminder.triggerAtMs(), reminder.recurrence(), reminder.createdAtMs(), retryAt);
+						reminder.triggerAtMs(), reminder.recurrence(), reminder.createdAtMs(), retryAt,
+						reminder.type());
 				local.put(id, retry);
 				writeRedis(retry, retryAt);
 				log.warn("提醒投递失败，60 秒后重试：id={}，用户={}", id, reminder.userId());
@@ -120,7 +148,7 @@ public class ReminderService {
 				}
 				Reminder updated = new Reminder(reminder.id(), reminder.userId(), reminder.content(),
 						next.toInstant().toEpochMilli(), reminder.recurrence(), reminder.createdAtMs(),
-						next.toInstant().toEpochMilli());
+						next.toInstant().toEpochMilli(), reminder.type());
 				local.put(id, updated);
 				writeRedis(updated, updated.triggerAtMs());
 			}
@@ -203,7 +231,12 @@ public class ReminderService {
 	}
 
 	public enum Recurrence { NONE, DAILY, WEEKLY }
+	/** type 为 null 表示普通文字提醒；历史 Redis 数据缺少该字段时反序列化为 null。 */
 	public record Reminder(String id, String userId, String content, long triggerAtMs,
-			Recurrence recurrence, long createdAtMs, long nextAttemptAtMs) { }
+			Recurrence recurrence, long createdAtMs, long nextAttemptAtMs, String type) {
+		public boolean isBriefing() {
+			return "briefing".equals(type);
+		}
+	}
 	@FunctionalInterface public interface ReminderNotifier { boolean deliver(Reminder reminder); }
 }

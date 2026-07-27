@@ -58,6 +58,18 @@ public class VoicePreferenceService {
 		return text.toString();
 	}
 
+	public int clearByUserIdPrefix(String sessionPrefix) {
+		if (sessionPrefix == null || sessionPrefix.isBlank()) return 0;
+		int before = preferences.size();
+		preferences.keySet().removeIf(userId -> userId.startsWith(sessionPrefix));
+		int removed = before - preferences.size();
+		if (removed > 0) {
+			save();
+			log.info("已删除账户关联音色偏好：数量={}", removed);
+		}
+		return removed;
+	}
+
 	private void load() {
 		if (!Files.isRegularFile(storageFile)) return;
 		try {

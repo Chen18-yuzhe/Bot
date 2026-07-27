@@ -81,4 +81,8 @@ public class AssistantService {
 		conversationMemory.clear(sessionId);
 	}
 
+	public int clearConversationsByPrefix(String sessionPrefix) {
+		return conversationMemory.clearBySessionPrefix(sessionPrefix);
+	}
+
 }

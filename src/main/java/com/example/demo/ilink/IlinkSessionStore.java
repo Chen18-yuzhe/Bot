@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.stream.Stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,10 +32,12 @@ public class IlinkSessionStore {
 
 	private final ObjectMapper objectMapper = new ObjectMapper();
 	private final Path path;
+	private final Path accountsDirectory;
 
 	public IlinkSessionStore(
 			@Value("${assistant.ilink.credentials-file:${user.home}/.demo-ilink/credentials.json}") String path) {
 		this.path = Path.of(path).toAbsolutePath().normalize();
+		this.accountsDirectory = this.path.resolveSibling("accounts");
 	}
 
 	public ResumeContext load() {
@@ -53,29 +57,104 @@ public class IlinkSessionStore {
 		}
 	}
 
+	public Map<String, ResumeContext> loadAll() {
+		Map<String, ResumeContext> sessions = new LinkedHashMap<>();
+		ResumeContext legacyDefault = load();
+		if (legacyDefault != null) {
+			sessions.put("default", legacyDefault);
+		}
+		if (!Files.isDirectory(accountsDirectory)) {
+			return sessions;
+		}
+		try (Stream<Path> files = Files.list(accountsDirectory)) {
+			files.filter(Files::isRegularFile)
+					.filter(file -> file.getFileName().toString().endsWith(".json"))
+					.sorted()
+					.forEach(file -> {
+						String fileName = file.getFileName().toString();
+						String accountId = fileName.substring(0, fileName.length() - 5);
+						ResumeContext context = load(file);
+						if (context != null) {
+							sessions.put(accountId, context);
+						}
+					});
+		} catch (IOException exception) {
+			log.warn("无法枚举 iLink 多账户会话：{}", exception.getMessage());
+		}
+		return sessions;
+	}
+
 	public synchronized void save(ResumeContext resumeContext) {
+		save(path, resumeContext);
+	}
+
+	public synchronized void save(String accountId, ResumeContext resumeContext) {
+		save(accountPath(accountId), resumeContext);
+		if ("default".equals(accountId)) {
+			removeLegacyDefault();
+		}
+	}
+
+	public synchronized void delete(String accountId) {
+		try {
+			Files.deleteIfExists(accountPath(accountId));
+			if ("default".equals(accountId)) {
+				Files.deleteIfExists(path);
+			}
+		} catch (IOException exception) {
+			throw new IllegalStateException("无法删除 iLink 账户会话：" + accountId, exception);
+		}
+	}
+
+	private void removeLegacyDefault() {
+		try {
+			Files.deleteIfExists(path);
+		} catch (IOException exception) {
+			log.warn("默认账户已迁移，但旧 iLink 会话文件无法删除：{}", exception.getMessage());
+		}
+	}
+
+	private void save(Path target, ResumeContext resumeContext) {
 		if (resumeContext == null || resumeContext.getLoginContext() == null) {
 			return;
 		}
 		try {
-			Files.createDirectories(path.getParent());
-			Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+			Files.createDirectories(target.getParent());
+			Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
 			String json = objectMapper.writerWithDefaultPrettyPrinter()
 					.writeValueAsString(fromResumeContext(resumeContext));
 			Files.writeString(temporary, json, StandardCharsets.UTF_8);
 			try {
-				Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE,
+				Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE,
 						StandardCopyOption.REPLACE_EXISTING);
 			} catch (AtomicMoveNotSupportedException exception) {
-				Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+				Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
 			}
 		} catch (IOException exception) {
-			throw new IllegalStateException("无法保存 iLink 会话到 " + path, exception);
+			throw new IllegalStateException("无法保存 iLink 会话到 " + target, exception);
 		}
 	}
 
 	public Path path() {
 		return path;
+	}
+
+	public Path accountPath(String accountId) {
+		if (accountId == null || !accountId.matches("[A-Za-z0-9_-]{1,80}")) {
+			throw new IllegalArgumentException("iLink accountId 格式无效");
+		}
+		return accountsDirectory.resolve(accountId + ".json");
+	}
+
+	private ResumeContext load(Path source) {
+		try {
+			JsonNode root = objectMapper.readTree(Files.readString(source, StandardCharsets.UTF_8));
+			StoredSession stored = objectMapper.treeToValue(root, StoredSession.class);
+			return toResumeContext(stored);
+		} catch (Exception exception) {
+			log.warn("无法读取 iLink 账户会话 {}：{}", source.getFileName(), exception.getMessage());
+			return null;
+		}
 	}
 
 	private ResumeContext migrateLegacySession(JsonNode root) {

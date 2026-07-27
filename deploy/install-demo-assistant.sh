@@ -161,9 +161,11 @@ DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/api/v1}
 read -r -p "QWEATHER_API_HOST (your dedicated API Host): " QWEATHER_API_HOST
 read -r -s -p "QWEATHER_API_KEY: " QWEATHER_API_KEY
 echo
+read -r -s -p "ADMIN_API_TOKEN: " ADMIN_API_TOKEN
+echo
 
-if [[ -z "${DASHSCOPE_API_KEY}" || -z "${DASHSCOPE_BASE_URL}" || -z "${QWEATHER_API_HOST}" || -z "${QWEATHER_API_KEY}" ]]; then
-  echo "ERROR: All four application settings are required."
+if [[ -z "${DASHSCOPE_API_KEY}" || -z "${DASHSCOPE_BASE_URL}" || -z "${QWEATHER_API_HOST}" || -z "${QWEATHER_API_KEY}" || -z "${ADMIN_API_TOKEN}" ]]; then
+	echo "ERROR: All five application settings are required."
   exit 1
 fi
 
@@ -183,6 +185,7 @@ umask 0077
   printf 'DASHSCOPE_IMAGE_EDIT_SIZE=2K\n'
   printf 'QWEATHER_API_HOST=%s\n' "${QWEATHER_API_HOST}"
   printf 'QWEATHER_API_KEY=%s\n' "${QWEATHER_API_KEY}"
+  printf 'ADMIN_API_TOKEN=%s\n' "${ADMIN_API_TOKEN}"
   printf 'ILINK_CREDENTIALS_FILE=%s\n' "${DATA_DIR}/.demo-ilink/credentials.json"
   printf 'REDIS_URL=redis://127.0.0.1:6379/0\n'
   printf 'CONVERSATION_REDIS_ENABLED=true\n'
@@ -190,10 +193,22 @@ umask 0077
   printf 'KNOWLEDGE_BASE_PATH=%s\n' "${DATA_DIR}/knowledge"
   printf 'REMINDERS_ENABLED=true\n'
   printf 'REMINDERS_POLL_MS=10000\n'
+  printf '# StockTrace bot summary endpoint (query_stock_data tool).\n'
+  printf '#STOCK_TRACE_API_URL=\n'
+  printf '#STOCK_TRACE_BOT_TOKEN=\n'
+  printf '# StockTrace internal API (alerts, pending-event receipts, light quotes).\n'
+  printf '# Must reach the app over the container/private network; the public proxy 404s /internal/api/v1/*.\n'
+  printf '#STOCK_TRACE_INTERNAL_API_URL=\n'
+  printf '#STOCK_TRACE_INTERNAL_API_TOKEN=\n'
+  printf '# Per-user message rate limit and billed-upstream circuit breaker defaults.\n'
+  printf 'RATE_LIMIT_ENABLED=true\n'
+  printf 'RATE_LIMIT_PER_MINUTE=10\n'
+  printf '# Conversation audit stays off unless explicitly enabled (privacy).\n'
+  printf 'AUDIT_ENABLED=false\n'
 } > "${ENV_FILE}"
 chown root:"${APP_USER}" "${ENV_FILE}"
 chmod 0640 "${ENV_FILE}"
-unset DASHSCOPE_API_KEY DASHSCOPE_BASE_URL QWEATHER_API_HOST QWEATHER_API_KEY
+unset DASHSCOPE_API_KEY DASHSCOPE_BASE_URL QWEATHER_API_HOST QWEATHER_API_KEY ADMIN_API_TOKEN
 
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]

@@ -44,6 +44,19 @@ class ConversationMemoryTests {
 	}
 
 	@Test
+	void shouldClearOnlyConversationsForOneAccountPrefix() {
+		ConversationMemory memory = new ConversationMemory(8, 30);
+		memory.remember("account-a::user-1", "q1", "a1");
+		memory.remember("account-a::user-2", "q2", "a2");
+		memory.remember("account-b::user-1", "q3", "a3");
+
+		assertEquals(2, memory.clearBySessionPrefix("account-a::"));
+		assertTrue(memory.history("account-a::user-1").isEmpty());
+		assertTrue(memory.history("account-a::user-2").isEmpty());
+		assertEquals(1, memory.history("account-b::user-1").size());
+	}
+
+	@Test
 	void shouldPersistAndRestoreBoundedConversation() {
 		Path file = tempDir.resolve("conversations.json");
 		ConversationMemory first = new ConversationMemory(2, 30, 10, 200, 6000, file.toString(), new ObjectMapper());

@@ -11,7 +11,7 @@ import com.google.gson.JsonParser;
 public class ImageEditingTool implements AssistantTool {
 	private static final FunctionDefinition DEFINITION = FunctionDefinition.builder()
 			.name("edit_image")
-			.description("编辑用户本轮或近期上传的图片，可换背景、增删内容、改变风格、修复、扩图或增强。必须有图片附件。")
+			.description("编辑用户本轮或近期上传的已有图片，可换背景、增删内容、改变风格、修复、扩图或增强。必须有图片附件；从零创作新图片应调用图片生成工具。")
 			.parameters(JsonParser.parseString("""
 					{"type":"object","properties":{"instruction":{"type":"string","description":"明确、完整的图片编辑要求，说明保留内容和需要修改的内容"}},"required":["instruction"],"additionalProperties":false}
 					""").getAsJsonObject()).build();

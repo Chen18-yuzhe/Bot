@@ -19,6 +19,11 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-data-redis</artifactId>
 		</dependency>
+		<!-- 健康检查与 Micrometer 指标（工具耗时 P95/P99 分位数）。 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.apache.poi</groupId>
 			<artifactId>poi-ooxml</artifactId>
@@ -59,6 +64,12 @@
 		</dependency>
 
 		<dependency>
+			<groupId>com.google.zxing</groupId>
+			<artifactId>core</artifactId>
+			<version>3.5.4</version>
+		</dependency>
+
+		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 			<exclusions>
@@ -69,6 +80,13 @@
 					<artifactId>spring-boot-starter-jackson</artifactId>
 				</exclusion>
 			</exclusions>
+		</dependency>
+		<!-- iLink SDK requires Jackson 2's com.fasterxml.jackson.databind.ObjectMapper.
+		     Boot 4's Jackson 3 starter stays excluded above. -->
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-databind</artifactId>
+			<version>2.21.4</version>
 		</dependency>
 
 		<dependency>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+	<!-- %maskedMsg：所有日志先经过脱敏（API Key、Bearer 令牌、手机号）。 -->
+	<conversionRule conversionWord="maskedMsg"
+			class="com.example.demo.logging.SensitiveDataConverter"/>
+
+	<appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+		<encoder>
+			<!-- [requestId] 贯穿 HTTP 与 iLink 消息处理全链路。 -->
+			<pattern>%d{HH:mm:ss} %-5level [%X{requestId:-}] %logger{30} - %maskedMsg%n</pattern>
+			<charset>UTF-8</charset>
+		</encoder>
+	</appender>
+
+	<!-- 日志级别仍由 application.properties 的 logging.level.* 控制。 -->
+	<root level="WARN">
+		<appender-ref ref="CONSOLE"/>
+	</root>
+</configuration>

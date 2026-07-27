@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversation;
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationParam;
@@ -25,15 +26,21 @@ public class QwenService {
 	private static final String SYSTEM_PROMPT = "你是一个运行在微信中的AI助手，请用简洁、友好的中文回答用户问题。";
 
 	private final String apiKey;
-	private final String model;
 	private final String baseUrl;
+	private final DashScopeModelFallback modelFallback;
 
+	@Autowired
 	public QwenService(@Value("${aliyun.dashscope.api-key:}") String apiKey,
 			@Value("${aliyun.dashscope.model:qwen3.7-plus}") String model,
-			@Value("${aliyun.dashscope.base-url:}") String baseUrl) {
+			@Value("${aliyun.dashscope.base-url:}") String baseUrl,
+			DashScopeModelFallback modelFallback) {
 		this.apiKey = apiKey;
-		this.model = model;
 		this.baseUrl = baseUrl;
+		this.modelFallback = modelFallback;
+	}
+
+	QwenService(String apiKey, String model, String baseUrl) {
+		this(apiKey, model, baseUrl, new DashScopeModelFallback(model, "", java.time.Duration.ofMinutes(5)));
 	}
 
 	public String chat(String question) {
@@ -69,16 +76,14 @@ public class QwenService {
 		messages.add(message(Role.USER, question));
 
 		configureEndpoint();
-		log.info("正在调用千问模型：{}", model);
 		long startedAt = System.nanoTime();
 		try {
-			MultiModalConversationParam request = MultiModalConversationParam.builder()
-					.apiKey(apiKey)
-					.model(model)
-					.messages(messages)
-					.maxTokens(1600)
-					.build();
-			MultiModalConversationResult response = new MultiModalConversation().call(request);
+			MultiModalConversationResult response = modelFallback.call("文本对话", model -> {
+				log.info("正在调用千问模型：{}", model);
+				MultiModalConversationParam request = MultiModalConversationParam.builder()
+						.apiKey(apiKey).model(model).messages(messages).maxTokens(1600).build();
+				return new MultiModalConversation().call(request);
+			});
 			Object answerValue = response.getOutput().getChoices().get(0).getMessage().getContent().stream()
 					.filter(part -> part.containsKey("text"))
 					.map(part -> part.get("text"))
@@ -90,6 +95,8 @@ public class QwenService {
 			String answer = answerValue.toString().trim();
 			log.info("千问模型调用成功，耗时={}毫秒", (System.nanoTime() - startedAt) / 1_000_000);
 			return answer;
+		} catch (ApplicationException exception) {
+			throw exception;
 		} catch (Exception exception) {
 			log.error("千问 SDK 调用失败：{}", exception.getMessage(), exception);
 			throw new ApplicationException(HttpStatus.BAD_GATEWAY,

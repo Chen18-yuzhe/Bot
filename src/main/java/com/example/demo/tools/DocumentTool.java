@@ -12,7 +12,7 @@ import com.google.gson.JsonParser;
 public class DocumentTool implements AssistantTool {
 	private static final FunctionDefinition DEFINITION = FunctionDefinition.builder()
 			.name("process_document")
-			.description("处理用户上传的文档，可总结、问答、提取、改写、翻译或导出 DOCX。必须有文档附件。")
+			.description("临时处理本轮或近期上传的文档，可总结、问答、提取、改写、翻译或导出 DOCX。必须有文档附件；用户要求永久保存到知识库时不要调用本工具，应调用知识库导入工具。")
 			.parameters(JsonParser.parseString("""
 					{"type":"object","properties":{"instruction":{"type":"string","description":"对文档执行的完整要求"},"output":{"type":"string","enum":["auto","text","file"],"description":"text 返回文字，file 返回 DOCX，auto 按内容长度和用户要求决定"}},"required":["instruction"],"additionalProperties":false}
 					""").getAsJsonObject()).build();
@@ -31,7 +31,9 @@ public class DocumentTool implements AssistantTool {
 		var result = service.summarize(context.documents().get(0), instruction);
 		boolean returnFile = "file".equals(output) || ("auto".equals(output)
 				&& DocumentReplyPolicy.shouldReturnFile(instruction, result.summary(), 1800));
-		return returnFile ? ToolResult.document("文档已经处理完成，结果文件已生成。", result)
+		if (returnFile) return ToolResult.document("文档已经处理完成，结果文件已生成。", result);
+		return result.summary() == null || result.summary().isBlank()
+				? ToolResult.noResult("文档处理完成，但没有生成有效文字结果。")
 				: ToolResult.text(result.summary());
 	}
 }

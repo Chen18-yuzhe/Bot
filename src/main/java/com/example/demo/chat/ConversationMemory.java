@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -163,6 +165,33 @@ public class ConversationMemory {
 		sessions.remove(sessionId);
 		deleteRedis(sessionId);
 		scheduleSave();
+	}
+
+	/** Removes every persisted conversation whose session id belongs to an account namespace. */
+	public int clearBySessionPrefix(String sessionPrefix) {
+		if (sessionPrefix == null || sessionPrefix.isBlank()) return 0;
+		Set<String> sessionIds = new LinkedHashSet<>();
+		sessions.keySet().stream().filter(id -> id.startsWith(sessionPrefix)).forEach(sessionIds::add);
+		if (redisEnabled) {
+			try {
+				Set<String> keys = redis.keys(redisKeyPrefix + "*");
+				if (keys != null) {
+					for (String key : keys) {
+						String json = redis.opsForValue().get(key);
+						if (json == null) continue;
+						StoredSession stored = objectMapper.readValue(json, StoredSession.class);
+						if (stored.sessionId() != null && stored.sessionId().startsWith(sessionPrefix)) {
+							sessionIds.add(stored.sessionId());
+						}
+					}
+				}
+				redisWarningLogged.set(false);
+			} catch (Exception error) {
+				warnRedis("枚举待删除会话", error);
+			}
+		}
+		sessionIds.forEach(this::clear);
+		return sessionIds.size();
 	}
 
 	public int activeSessionCount() {

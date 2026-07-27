@@ -33,29 +33,38 @@ public class KnowledgeBaseService {
 	}
 
 	public String search(String query, int requestedLimit) {
+		return searchForAccount(null, query, requestedLimit);
+	}
+
+	public String searchForSession(String sessionId, String query, int requestedLimit) {
+		return searchForAccount(accountIdForSession(sessionId), query, requestedLimit);
+	}
+
+	public String searchForAccount(String accountId, String query, int requestedLimit) {
 		if (query == null || query.isBlank()) throw new IllegalArgumentException("知识库问题不能为空");
 		int limit = Math.max(1, Math.min(8, requestedLimit));
 		long startedAt = System.nanoTime();
-		if (!Files.isDirectory(root)) {
-			log.info("知识库目录不存在：{}", root);
-			return "个人知识库尚未建立。请把 Markdown、TXT、CSV、JSON、YAML、Java、XML 或 SQL 文件放入：" + root;
+		Path accountRoot = accountId == null ? root : accountRoot(accountId);
+		if (!Files.isDirectory(accountRoot)) {
+			log.info("账号知识库目录不存在：账户={}，目录={}", accountId, accountRoot);
+			return "该机器人还没有知识库资料。";
 		}
 		Set<String> tokens = tokens(query);
 		List<Hit> hits = new ArrayList<>();
 		int fileCount = 0;
-		try (var stream = Files.walk(root, 6)) {
+		try (var stream = Files.walk(accountRoot, 6)) {
 			for (Path file : stream.filter(Files::isRegularFile).limit(MAX_FILES).toList()) {
 				if (!supported(file) || Files.size(file) > MAX_FILE_BYTES) continue;
 				fileCount++;
 				String content = Files.readString(file, StandardCharsets.UTF_8);
-				String relative = root.relativize(file).toString();
+				String relative = accountRoot.relativize(file).toString();
 				for (String chunk : chunks(content)) {
 					int score = score(tokens, (relative + "\n" + chunk).toLowerCase(Locale.ROOT));
 					if (score > 0) hits.add(new Hit(relative, compact(chunk), score));
 				}
 			}
 		} catch (Exception error) {
-			log.error("读取个人知识库失败：目录={}，原因={}", root, error.getMessage(), error);
+			log.error("读取账号知识库失败：账户={}，目录={}，原因={}", accountId, accountRoot, error.getMessage(), error);
 			throw new IllegalStateException("读取个人知识库失败", error);
 		}
 		hits.sort(Comparator.comparingInt(Hit::score).reversed());
@@ -76,16 +85,25 @@ public class KnowledgeBaseService {
 	public Path root() { return root; }
 
 	public Path add(String requestedName, String content) {
+		return addForAccount(null, requestedName, content);
+	}
+
+	public Path addForSession(String sessionId, String requestedName, String content) {
+		return addForAccount(accountIdForSession(sessionId), requestedName, content);
+	}
+
+	public Path addForAccount(String accountId, String requestedName, String content) {
 		if (content == null || content.isBlank()) throw new IllegalArgumentException("知识内容不能为空");
 		String base = requestedName == null ? "" : requestedName.replaceAll("[^\\p{L}\\p{N}._-]", "_");
 		if (base.isBlank()) base = "knowledge-" + UUID.randomUUID().toString().substring(0, 8) + ".txt";
 		if (!hasSupportedExtension(base)) base += ".txt";
 		if (base.length() > 120) base = base.substring(base.length() - 120);
+		Path accountRoot = accountId == null ? root : accountRoot(accountId);
 		try {
-			Files.createDirectories(root);
-			Path destination = root.resolve(base).normalize();
-			if (!destination.startsWith(root)) throw new IllegalArgumentException("知识文件名无效");
-			if (Files.exists(destination)) destination = uniqueDestination(base);
+			Files.createDirectories(accountRoot);
+			Path destination = accountRoot.resolve(base).normalize();
+			if (!destination.startsWith(accountRoot)) throw new IllegalArgumentException("知识文件名无效");
+			if (Files.exists(destination)) destination = uniqueDestination(accountRoot, base);
 			Files.writeString(destination, content, StandardCharsets.UTF_8);
 			log.info("知识库文件已写入：文件={}，字数={}", destination.getFileName(), content.length());
 			return destination;
@@ -95,12 +113,49 @@ public class KnowledgeBaseService {
 		}
 	}
 
-	private Path uniqueDestination(String base) {
+	public List<KnowledgeFile> list(String accountId) {
+		Path accountRoot = accountRoot(accountId);
+		if (!Files.isDirectory(accountRoot)) return List.of();
+		try (var stream = Files.list(accountRoot)) {
+			return stream.filter(Files::isRegularFile).filter(KnowledgeBaseService::supported)
+					.map(path -> new KnowledgeFile(path.getFileName().toString(), safeSize(path), safeModified(path)))
+					.sorted(Comparator.comparing(KnowledgeFile::modifiedAtMs).reversed()).toList();
+		} catch (java.io.IOException error) {
+			throw new IllegalStateException("读取账号知识库文件失败", error);
+		}
+	}
+
+	public void delete(String accountId, String fileName) {
+		String safeName = fileName == null ? "" : Path.of(fileName).getFileName().toString();
+		if (!hasSupportedExtension(safeName)) throw new IllegalArgumentException("不支持的知识库文件");
+		Path accountRoot = accountRoot(accountId);
+		Path file = accountRoot.resolve(safeName).normalize();
+		if (!file.startsWith(accountRoot)) throw new IllegalArgumentException("知识库文件名无效");
+		try { Files.deleteIfExists(file); }
+		catch (java.io.IOException error) { throw new IllegalStateException("删除知识库文件失败", error); }
+	}
+
+	public Path accountRoot(String accountId) {
+		String safe = (accountId == null ? "default" : accountId).replaceAll("[^a-zA-Z0-9._-]", "_");
+		if (safe.isBlank()) safe = "default";
+		return root.resolve("accounts").resolve(safe).normalize();
+	}
+
+	static String accountIdForSession(String sessionId) {
+		if (sessionId == null || sessionId.isBlank()) return "default";
+		int marker = sessionId.indexOf("::");
+		return marker > 0 ? sessionId.substring(0, marker) : "default";
+	}
+
+	private Path uniqueDestination(Path accountRoot, String base) {
 		int dot = base.lastIndexOf('.');
 		String stem = dot > 0 ? base.substring(0, dot) : base;
 		String extension = dot > 0 ? base.substring(dot) : "";
-		return root.resolve(stem + "-" + UUID.randomUUID().toString().substring(0, 8) + extension).normalize();
+		return accountRoot.resolve(stem + "-" + UUID.randomUUID().toString().substring(0, 8) + extension).normalize();
 	}
+
+	private static long safeSize(Path file) { try { return Files.size(file); } catch (java.io.IOException error) { return 0; } }
+	private static long safeModified(Path file) { try { return Files.getLastModifiedTime(file).toMillis(); } catch (java.io.IOException error) { return 0; } }
 
 	private static boolean hasSupportedExtension(String name) {
 		int dot = name.lastIndexOf('.');
@@ -152,4 +207,5 @@ public class KnowledgeBaseService {
 	}
 
 	private record Hit(String file, String excerpt, int score) { }
+	public record KnowledgeFile(String name, long size, long modifiedAtMs) { }
 }

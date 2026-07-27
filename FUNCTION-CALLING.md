@@ -5,7 +5,12 @@
 - `FunctionDefinition` 声明名称、用途和 JSON Schema。
 - `AssistantToolRegistry` 把每个函数包装为 `ToolFunction`，注册到 `MultiModalConversationParam.tools(...)`。
 - `FunctionCallingService` 接收模型返回的 `ToolCallFunction`，执行 Java 工具，并用带 `toolCallId` 的 `tool` 消息回传结果。
-- 每轮最多执行 4 轮工具调用，未知工具、非法 JSON、缺失参数都会被拒绝。
+- 支持顺序链式调用：模型可以多次调用同一工具，也可以把前一步结果用于后续不同工具。
+- 每个请求最多执行 6 轮模型工具决策、8 次实际工具调用，单个工具最多 5 次。
+- 工具链守卫会规范化参数后识别重复调用；相同参数成功执行后禁止再次执行，避免重复提醒、重复写入和重复产生云端费用。
+- 同一工具连续失败或返回无有效结果时只允许修正参数重试一次；再次无进展后关闭工具调用，要求模型向用户澄清。
+- 工具执行失败会以结构化失败结果回传模型，模型可以调整参数、改用其他工具或基于已成功步骤回答；未知工具和非法 JSON 仍会被拒绝。
+- 始终使用 `parallelToolCalls(false)`，保证有依赖关系的工具按顺序执行。
 
 ## 新增工具
 
@@ -27,7 +32,7 @@
 
 现有工具：
 
-- `query_weather(city, queryType)`
+- `query_weather(city|cities, queryType)`：单城市查询兼容原参数；比较天气时可用 `cities` 一次查询 2～5 个城市
 - `generate_image(prompt)`
 - `edit_image(instruction)`
 - `search_web(query)`
@@ -38,5 +43,31 @@
 - `transcribe_audio(instruction)`
 - `synthesize_speech(text, voice)`
 - `manage_voice(action, voice)`
+- `query_time(location, timeZone|locations)`：查询世界各地区当前时间；省略参数时默认北京时间，批量最多8个地区
+- `scientific_calculator(expression, angleUnit, precision)`：本地精确科学计算，默认三角函数使用角度制
+- `calculate_body_fat(gender, heightCm, waistCm, neckCm, hipCm)`：成人美国海军围度法体脂率估算，结果非医疗诊断
+- `lookup_daily_info(category, query, ...)`：联网查询全网热搜、城市 AQI、营养成分、菜谱或中国大陆节假日；返回内容保留来源
+- `query_stock_data(symbol)`：查询 A 股行情与已核验研究摘要（StockTrace Bot 接口）
+- `manage_stock_alert(action, stockCode, ruleType, threshold, ...)`：管理股价预警（StockTrace 内部 API）；触发事件由后台每分钟轮询拉取，推送微信后回执，投递失败自动重试
+- `manage_watchlist(action, symbol)`：自选股增删查与一键批量行情（Redis 按会话隔离），同时是简报和预警的默认标的
+- `manage_briefing(action, time, city)`：订阅/退订每日简报；内容（天气+自选股行情+热搜）在投递时现场生成
 
-所有工具调用都会记录工具名、轮次、成功或失败状态及耗时指标，但不会记录 API Key 或附件字节。
+所有工具调用都会记录工具名、轮次、成功或失败状态及耗时指标（含 Micrometer P95/P99 与 Redis 用量日桶），但不会记录 API Key 或附件字节。“涨到/跌破某价提醒我”类请求强制路由到 `manage_stock_alert`，不允许落到普通定时提醒。
+
+计费上游（生图、图片编辑、联网搜索）由 `UpstreamGuard` 熔断保护：连续失败后快速失败一段时间再放行探测；参数错误和内容审核拒绝不计入熔断。微信消息入口按用户每分钟限流（`assistant.rate-limit.*`）。
+
+## 链式调用约定
+
+- 同一问题需要多个实时事实时，模型必须先获得全部必要事实，再生成最终回答。例如比较北京和杭州天气时，应批量查询两个城市。
+- 后一步依赖前一步结果时，使用多轮顺序调用。例如“查询天气，如果下雨就创建提醒”先调用天气工具，再根据实际结果决定是否调用提醒工具。
+- 工具失败结果包含 `success=false`、错误码、可读消息和是否建议重试。失败动作不得被描述为已经完成。
+- 工具可以用 `ToolResult.noResult(...)` 明确表示“执行正常但没有命中”。这类结果不计为成功进展，不能触发无限换词重试。
+- 保护触发后下一轮强制使用 `toolChoice=none`。如果模型仍返回工具请求，服务使用固定澄清回复兜底，不再执行外部调用。
+- 工具自身存在天然批量语义时，优先提供受限批量参数；复杂的跨能力流程继续交由通用模型工具循环编排。
+
+## 健康与生活信息边界
+
+- 科学计算和体脂率必须调用本地工具，避免模型心算误差。
+- 全球时间复用 `query_time`，默认北京时间；不新增重复工具。
+- 热搜、空气质量、营养成分、菜谱和节假日使用 `lookup_daily_info` 联网获取，避免将过期数据当作实时结果。
+- “健康小妙招”属于通用生活建议，不单独调用工具；不得诊断疾病、替代医生或承诺疗效。涉及急性症状、孕期、未成年人、用药或慢性病管理时，应建议用户咨询专业人士。

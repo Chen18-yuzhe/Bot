@@ -1,9 +1,16 @@
 package com.example.demo.chat;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.time.ZonedDateTime;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
@@ -21,6 +28,7 @@ import com.alibaba.dashscope.tools.ToolCallBase;
 import com.alibaba.dashscope.tools.ToolCallFunction;
 import com.alibaba.dashscope.utils.Constants;
 import com.example.demo.ApplicationException;
+import com.example.demo.stock.StockTraceService;
 import com.example.demo.tools.AssistantTool;
 import com.example.demo.tools.AssistantToolRegistry;
 import com.example.demo.tools.ToolContext;
@@ -34,7 +42,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Service
 public class FunctionCallingService {
 	private static final Logger log = LoggerFactory.getLogger(FunctionCallingService.class);
-	private static final int MAX_TOOL_ROUNDS = 4;
+	private static final int MAX_TOOL_ROUNDS = 6;
 	private static final Pattern EXPLICIT_IMAGE_REQUEST = Pattern.compile(
 			"(?:生成|画|绘制|制作|创作|设计).{0,16}(?:图片|图像|照片|头像|图标|海报|插画|画)|"
 			+ "(?:图片|图像|照片|头像|图标|海报|插画).{0,16}(?:生成|画|绘制|制作|创作|设计)");
@@ -42,34 +50,73 @@ public class FunctionCallingService {
 			"(?:修改|编辑|替换|添加|删除|移除|换背景|换成|改成|放到|移到|扩图|修复|增强|去水印|变清晰|调色)");
 	private static final Pattern REMINDER_REQUEST = Pattern.compile(
 			"(?:提醒我|记得提醒|设置提醒|创建提醒|取消.{0,6}提醒|查看.{0,6}提醒|提醒列表|有哪些提醒|待办列表)");
+	/** 价格条件+提醒是预警而不是定时提醒；必须先于 REMINDER_REQUEST 判断。 */
+	private static final Pattern STOCK_ALERT_REQUEST = Pattern.compile(
+			"(?:涨到|涨破|涨过|突破|跌到|跌破|跌穿|低于|高于|回本|止盈|止损).{0,12}(?:提醒|通知|告诉我)"
+			+ "|(?:股价|股票).{0,4}预警|(?:创建|取消|删除|查看|停用|启用|暂停|恢复).{0,4}预警|预警列表|帮我盯|盯盘");
+	private static final Pattern WEATHER_ALERT_TERMS = Pattern.compile("天气|气象|暴雨|台风|寒潮|高温|大风|暴雪");
+	private static final Pattern BRIEFING_REQUEST = Pattern.compile(
+			"(?:订阅|取消|退订|停掉|推送|发).{0,8}(?:早报|收盘报|日报|每日简报|简报)|(?:早报|收盘报|每日简报)");
+	private static final Pattern WATCHLIST_REQUEST = Pattern.compile(
+			"(?:加|加入|添加|移除|删除|取关|关注).{0,8}自选|自选(?:股)?(?:列表|清单|行情|表现)|我的自选");
 	private static final Pattern SPEECH_REQUEST = Pattern.compile("^(?:语音合成|合成语音)\\s*[：:].+");
 	private static final Pattern VOICE_REQUEST = Pattern.compile("^(?:音色列表|当前音色|切换音色|设置音色|/voices|/voice).*");
+	private static final Pattern TIME_REQUEST = Pattern.compile(
+			"^(?:请问|帮我查|查询|告诉我)?\\s*.{0,30}(?:现在几点|几点了|当前时间|当地时间|是什么时间|时差).*$");
+	private static final Pattern BODY_FAT_REQUEST = Pattern.compile(".*(?:体脂率|BFR|body\\s*fat).*", Pattern.CASE_INSENSITIVE);
+	private static final Pattern CALCULATION_REQUEST = Pattern.compile(
+			"^(?:计算|算一下|科学计算)\\s*[：:].+|.*(?:sqrt|sin|cos|tan|ln|log|\\^|×|÷|\\d\\s*[+*/%]\\s*\\d).*",
+			Pattern.CASE_INSENSITIVE);
+	private static final Pattern STOCK_CODE_REQUEST = Pattern.compile("(?<!\\d)\\d{6}(?:\\.(?:SH|SZ|BJ))?(?!\\d)",
+			Pattern.CASE_INSENSITIVE);
+	private static final Pattern STOCK_INTENT_REQUEST = Pattern.compile(
+			".*(?:股票|股价|A股|买哪个|买哪只|值得买|值不值得买|该买|该卖|买入|卖出|持有|加仓|减仓|走势|估值|财报|涨跌|涨了|跌了|亏了|赚钱|回本|分析|行情|个股|大盘|K线|涨停|跌停).*",
+			Pattern.CASE_INSENSITIVE);
+	/** Direct-path fan-out cap: more codes than this go through the LLM. */
+	private static final int MAX_DIRECT_STOCK_SYMBOLS = 5;
 	private static final String SYSTEM_PROMPT = """
 			你是运行在微信中的中文 AI 助手。回答要简洁、自然、友好。
 			需要实时数据或执行外部能力时必须调用提供的工具，不得编造工具结果。
+			一个问题需要多个事实或多个外部动作时，可以按顺序多次调用同一工具或不同工具；必须等所需步骤全部完成后再综合回答。
+			比较多个对象时必须获取每个对象的数据。后续工具依赖前一步结果时，先读取工具结果再决定下一次调用。
+			工具返回失败结果时，可以调整参数、改用其他可用工具或基于已成功的数据回答，并明确说明缺失信息；不要声称失败的动作已经完成。
+			用户意图、必填参数或目标对象不明确时，先向用户提出一个简短的澄清问题，不要猜测参数后反复调用工具。
+			工具失败或没有结果时最多修正参数重试一次；仍无结果就停止调用并询问用户。已经成功执行的外部动作不得重复执行。
 			工具返回天气数据时，回答末尾注明“数据来源：和风天气”。
+			用户未指定地区而询问当前时间时，默认查询北京时间；不同地区时间必须使用时间工具，不得自行推算夏令时。
+			涉及数学表达式、三角函数、阶乘或精确数值计算时必须调用科学计算工具；用户询问体脂率/BFR时必须调用体脂估算工具。
+			用户询问带 6 位 A 股代码的股价、走势、估值、财报、风险或持仓复盘时，必须调用股票数据工具；只根据工具返回的数据截至时间、事实、风险和数据缺口回答。结论可概括为偏强、中性或偏弱并说明依据，但必须明确“仅供研究参考，不构成投资建议”，不得给出确定性的买入/卖出指令、目标价、仓位、止盈止损价或收益承诺。
+			热搜、空气质量、营养成分、菜谱和节假日属于可能变化的信息，必须调用实时生活信息工具并保留其来源。
+			用户要求“股价涨到/跌破某价时提醒”属于股价预警，必须用股价预警工具而不是普通定时提醒；订阅、退订每日早报或收盘报用简报工具；添加、移除自选股和查看自选股行情用自选股工具。
+			健康小妙招可直接给出通用、低风险的生活建议，但不得诊断疾病、替代医生或承诺疗效；出现急性症状、孕期、未成年人、用药或慢性病管理时建议咨询专业人士。
+			营养和体脂结果仅作一般参考，应说明食材、品牌、烹饪方式和围度测量误差会影响结果。
 			联网搜索工具返回来源链接时必须保留来源，不得删除或伪造链接。
 			人物文生图必须明确为成年人；不要在提示词中保留真实艺术家、导演或摄影师姓名，改写为可观察的视觉特征。
 			不要向用户展示工具名、JSON 参数或内部执行过程。
 			""";
 
 	private final String apiKey;
-	private final String model;
 	private final String baseUrl;
+	private final DashScopeModelFallback modelFallback;
 	private final AssistantToolRegistry registry;
 	private final ObjectMapper objectMapper;
 	private final ToolMetricsService metrics;
+	private final StockTraceService stockTraceService;
+	/** Virtual threads: cheap concurrent upstream calls without pool tuning. */
+	private final ExecutorService stockExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
 	public FunctionCallingService(@Value("${aliyun.dashscope.api-key:}") String apiKey,
-			@Value("${aliyun.dashscope.model:qwen3.7-plus}") String model,
 			@Value("${aliyun.dashscope.base-url:}") String baseUrl,
-			AssistantToolRegistry registry, ObjectMapper objectMapper, ToolMetricsService metrics) {
+			DashScopeModelFallback modelFallback,
+			AssistantToolRegistry registry, ObjectMapper objectMapper, ToolMetricsService metrics,
+			StockTraceService stockTraceService) {
 		this.apiKey = apiKey;
-		this.model = model;
 		this.baseUrl = baseUrl;
+		this.modelFallback = modelFallback;
 		this.registry = registry;
 		this.objectMapper = objectMapper;
 		this.metrics = metrics;
+		this.stockTraceService = stockTraceService;
 	}
 
 	public AssistantReply reply(String sessionId, String question, List<ConversationTurn> history) {
@@ -82,6 +129,8 @@ public class FunctionCallingService {
 
 	public AssistantReply reply(String sessionId, String question, List<ConversationTurn> history,
 			String context, List<MediaContent> media) {
+		AssistantReply stockReply = replyWithStockData(question, history);
+		if (stockReply != null) return stockReply;
 		if (apiKey == null || apiKey.isBlank()) {
 			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE, "请先配置环境变量 DASHSCOPE_API_KEY");
 		}
@@ -101,21 +150,36 @@ public class FunctionCallingService {
 		GeneratedDocument generatedDocument = null;
 		GeneratedAudio generatedAudio = null;
 		String forcedTool = forcedTool(question, context, media);
+		ToolChainGuard chainGuard = new ToolChainGuard();
+		boolean guardInstructionAdded = false;
 		configureEndpoint();
 		try {
 			for (int round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-				var requestBuilder = MultiModalConversationParam.builder()
-						.apiKey(apiKey).model(model).messages(messages)
-						.tools(registry.definitions()).parallelToolCalls(false)
-						.enableThinking(false).maxTokens(1600);
-				if (round == 0 && forcedTool != null) {
-					requestBuilder.toolChoice(registry.definition(forcedTool));
-					log.info("明确能力请求，强制选择 Function Calling 工具：{}", forcedTool);
-				} else {
-					requestBuilder.toolChoice("auto");
+				if (chainGuard.halted() && !guardInstructionAdded) {
+					messages.add(message(Role.SYSTEM.getValue(), "工具链保护已触发：" + chainGuard.haltReason()
+							+ "。禁止继续调用任何工具；请基于已有结果回答，并只询问一个最关键的澄清问题。"));
+					guardInstructionAdded = true;
 				}
-				MultiModalConversationParam request = requestBuilder.build();
-				MultiModalConversationResult response = new MultiModalConversation().call(request);
+				boolean toolsHalted = chainGuard.halted();
+				boolean forceToolThisRound = !toolsHalted && round == 0 && forcedTool != null;
+				if (forceToolThisRound) {
+					log.info("明确能力请求，强制选择 Function Calling 工具：{}", forcedTool);
+				}
+				MultiModalConversationResult response = modelFallback.call("Function Calling", model -> {
+					var requestBuilder = MultiModalConversationParam.builder()
+							.apiKey(apiKey).model(model).messages(messages)
+							.tools(registry.definitions()).parallelToolCalls(false)
+							.enableThinking(false).maxTokens(1600);
+					if (toolsHalted) {
+						requestBuilder.toolChoice("none");
+					} else if (forceToolThisRound) {
+						requestBuilder.toolChoice(registry.definition(forcedTool));
+						log.info("Function Calling 使用模型：{}", model);
+					} else {
+						requestBuilder.toolChoice("auto");
+					}
+					return new MultiModalConversation().call(requestBuilder.build());
+				});
 				MultiModalMessage assistant = response.getOutput().getChoices().get(0).getMessage();
 				messages.add(assistant);
 				List<ToolCallBase> calls = assistant.getToolCalls();
@@ -132,29 +196,44 @@ public class FunctionCallingService {
 					if (generatedAudio != null) return AssistantReply.audio(answer.trim(), generatedAudio);
 					return AssistantReply.text(answer.trim());
 				}
+				if (chainGuard.halted()) {
+					log.warn("模型在工具链停止后仍请求工具，已执行最终兜底");
+					return AssistantReply.text("我还缺少完成这个请求的必要信息。请把目标、范围或关键参数说得更具体一些，我再继续处理。");
+				}
 				if (round == MAX_TOOL_ROUNDS) throw new IllegalStateException("工具调用次数超过限制");
 				for (ToolCallBase base : calls) {
 					if (!(base instanceof ToolCallFunction call)) throw new IllegalArgumentException("不支持的工具调用类型");
 					String name = call.getFunction().getName();
 					JsonNode arguments = objectMapper.readTree(call.getFunction().getArguments());
 					AssistantTool tool = registry.require(name);
-					log.info("执行 Function Calling 工具：{}，轮次={}", name, round + 1);
-					ToolMetricsService.Invocation invocation = metrics.start(name);
+					ToolChainGuard.Decision decision = chainGuard.beforeCall(name, arguments);
+					if (!decision.allowed()) {
+						log.warn("阻止 Function Calling：{}，轮次={}，原因={}", name, round + 1, decision.code());
+						messages.add(toolMessage(call, name, toolFailureContent(name,
+								decision.code(), decision.message(), false)));
+						continue;
+					}
+					log.info("执行 Function Calling 工具：{}，轮次={}，调用序号={}/{}",
+							name, round + 1, decision.callNumber(), ToolChainGuard.MAX_TOTAL_CALLS);
+					ToolMetricsService.Invocation invocation = metrics.start(name, sessionId);
 					ToolResult result;
 					try {
 						result = tool.execute(arguments, new ToolContext(sessionId, question, media));
 						metrics.success(invocation);
-						log.info("Function Calling 工具执行成功：{}", name);
+						chainGuard.success(name, decision.fingerprint(), result);
+						log.info("Function Calling 工具执行完成：{}，结果有效={}", name, result.useful());
 					} catch (Exception toolError) {
-						metrics.failure(invocation);
+						metrics.failure(invocation, toolError.getMessage());
+						chainGuard.failure(name);
 						log.warn("Function Calling 工具执行失败：{}，原因={}", name, toolError.getMessage());
-						throw toolError;
+						messages.add(toolMessage(call, name, toolFailureContent(name,
+								"TOOL_EXECUTION_FAILED", safeToolErrorMessage(toolError), !chainGuard.halted())));
+						continue;
 					}
 					if (result.image() != null) generatedImage = result.image();
 					if (result.document() != null) generatedDocument = result.document();
 					if (result.audio() != null) generatedAudio = result.audio();
-					messages.add(MultiModalMessage.builder().role("tool").toolCallId(call.getId())
-							.name(name).content(List.of(java.util.Map.of("text", result.content()))).build());
+					messages.add(toolMessage(call, name, result.content()));
 				}
 			}
 			throw new IllegalStateException("Function Calling 未产生最终回答");
@@ -168,6 +247,126 @@ public class FunctionCallingService {
 			log.error("Function Calling 执行失败：{}", exception.getMessage(), exception);
 			throw new ApplicationException(HttpStatus.BAD_GATEWAY, "AI 工具调用失败，请稍后再试", exception);
 		}
+	}
+
+	/**
+	 * Stock quotes must not depend on the language model deciding whether to emit a
+	 * tool call. A six-digit A-share symbol is an unambiguous request for the
+	 * configured StockTrace data source, so call it directly and return only its
+	 * verified research summary.
+	 */
+	private AssistantReply replyWithStockData(String question, List<ConversationTurn> history) {
+		// 预警、自选和简报请求也常带股票词汇/代码，必须交给对应工具而不是直连行情。
+		if (question != null && (STOCK_ALERT_REQUEST.matcher(question).find()
+				|| WATCHLIST_REQUEST.matcher(question).find()
+				|| BRIEFING_REQUEST.matcher(question).find())) {
+			return null;
+		}
+		List<String> symbols = stockSymbols(question);
+		boolean intentWords = hasStockIntentWords(question);
+		// Any WeChat message can contain a stray 6-digit number (verification
+		// codes, order ids, amounts). Only hijack the message into the stock
+		// path when the user clearly asked about stocks.
+		if (!symbols.isEmpty() && !isExplicitStockRequest(question)) return null;
+		if (symbols.isEmpty() && intentWords) symbols = latestStockSymbols(history);
+		if (symbols.isEmpty()) {
+			return intentWords ? AssistantReply.text("请先发股票名称和 6 位代码，例如：贵州茅台（600519）。") : null;
+		}
+		String overflowNote = null;
+		if (symbols.size() > MAX_DIRECT_STOCK_SYMBOLS) {
+			overflowNote = "一次最多查询 " + MAX_DIRECT_STOCK_SYMBOLS + " 只股票，其余请分批发送。";
+			symbols = symbols.subList(0, MAX_DIRECT_STOCK_SYMBOLS);
+		}
+		// Fetch symbols concurrently and isolate per-symbol failures: one bad
+		// code must not discard the summaries that already succeeded.
+		List<CompletableFuture<String>> futures = symbols.stream()
+				.map(symbol -> CompletableFuture.supplyAsync(() -> fetchStockSection(symbol), stockExecutor))
+				.toList();
+		List<String> sections = new ArrayList<>(futures.stream().map(CompletableFuture::join).toList());
+		if (overflowNote != null) sections.add(overflowNote);
+		return AssistantReply.text(String.join("\n\n", sections));
+	}
+
+	/** Intent keywords only — unlike isStockIntent, a bare number is not intent. */
+	static boolean hasStockIntentWords(String question) {
+		return question != null && STOCK_INTENT_REQUEST.matcher(question.trim()).matches();
+	}
+
+	/**
+	 * True when the message is unambiguously a stock request: intent words,
+	 * an exchange-suffixed code, or a message that contains nothing except
+	 * codes and separators (the classic "600519" usage).
+	 */
+	static boolean isExplicitStockRequest(String question) {
+		List<String> symbols = stockSymbols(question);
+		if (symbols.isEmpty()) return false;
+		if (hasStockIntentWords(question)) return true;
+		if (symbols.stream().anyMatch(symbol -> symbol.indexOf('.') >= 0)) return true;
+		String residue = question;
+		for (String symbol : symbols) {
+			residue = residue.replace(symbol, " ");
+		}
+		residue = residue.replaceAll("[\\s，,、。.;；:：()（）？?！!的和与]+", "");
+		return residue.length() <= 2;
+	}
+
+	private String fetchStockSection(String symbol) {
+		ToolMetricsService.Invocation invocation = metrics.start("query_stock_data");
+		try {
+			StockTraceService.StockSummary summary = stockTraceService.summary(symbol);
+			metrics.success(invocation);
+			return summary.reply();
+		} catch (RuntimeException exception) {
+			metrics.failure(invocation, exception.getMessage());
+			log.warn("股票摘要查询失败：{} - {}", symbol, exception.getMessage());
+			return symbol + "：" + safeToolErrorMessage(exception);
+		}
+	}
+
+	static List<String> stockSymbols(String question) {
+		if (question == null || question.isBlank()) return List.of();
+		Matcher matcher = STOCK_CODE_REQUEST.matcher(question);
+		Set<String> symbols = new LinkedHashSet<>();
+		while (matcher.find()) symbols.add(matcher.group().toUpperCase(java.util.Locale.ROOT));
+		return List.copyOf(symbols);
+	}
+
+	static boolean isStockIntent(String question) {
+		return !stockSymbols(question).isEmpty()
+				|| (question != null && STOCK_INTENT_REQUEST.matcher(question.trim()).matches());
+	}
+
+	static List<String> latestStockSymbols(List<ConversationTurn> history) {
+		if (history == null) return List.of();
+		for (int index = history.size() - 1; index >= 0; index--) {
+			List<String> symbols = stockSymbols(history.get(index).userMessage());
+			if (!symbols.isEmpty()) return symbols;
+		}
+		return List.of();
+	}
+
+	private static MultiModalMessage toolMessage(ToolCallFunction call, String name, String content) {
+		return MultiModalMessage.builder().role("tool").toolCallId(call.getId())
+				.name(name).content(List.of(Map.of("text", content))).build();
+	}
+
+	private String toolFailureContent(String tool, String code, String message, boolean retryable) {
+		var failure = objectMapper.createObjectNode();
+		failure.put("success", false);
+		failure.put("tool", tool);
+		failure.put("errorCode", code);
+		failure.put("message", message);
+		failure.put("retryable", retryable);
+		return failure.toString();
+	}
+
+	static String safeToolErrorMessage(Exception exception) {
+		if (!(exception instanceof ApplicationException) && !(exception instanceof IllegalArgumentException)) {
+			return "外部能力暂时不可用";
+		}
+		String message = exception.getMessage();
+		if (message == null || message.isBlank()) return "外部能力暂时不可用";
+		return message.length() > 300 ? message.substring(0, 300) + "…" : message;
 	}
 
 	private static MultiModalMessage message(String role, String content) {
@@ -197,7 +396,16 @@ public class FunctionCallingService {
 		if (requiresImageGeneration(question, context)) return "generate_image";
 		if (SPEECH_REQUEST.matcher(value).matches()) return "synthesize_speech";
 		if (VOICE_REQUEST.matcher(value.toLowerCase(java.util.Locale.ROOT)).matches()) return "manage_voice";
+		if (STOCK_ALERT_REQUEST.matcher(value).find() && !WEATHER_ALERT_TERMS.matcher(value).find()) {
+			return "manage_stock_alert";
+		}
+		if (BRIEFING_REQUEST.matcher(value).find()) return "manage_briefing";
+		if (WATCHLIST_REQUEST.matcher(value).find()) return "manage_watchlist";
 		if (REMINDER_REQUEST.matcher(value).find()) return "manage_reminder";
+		if (TIME_REQUEST.matcher(value).matches()) return "query_time";
+		if (BODY_FAT_REQUEST.matcher(value).matches()) return "calculate_body_fat";
+		if (CALCULATION_REQUEST.matcher(value).matches()) return "scientific_calculator";
+		if (isExplicitStockRequest(value)) return "query_stock_data";
 		return null;
 	}
 

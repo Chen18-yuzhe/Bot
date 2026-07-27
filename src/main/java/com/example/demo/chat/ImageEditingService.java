@@ -33,17 +33,21 @@ public class ImageEditingService {
 	private final String size;
 	private final String baseUrl;
 	private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
+	private final com.example.demo.guard.UpstreamGuard upstreamGuard;
 
 	public ImageEditingService(@Value("${aliyun.dashscope.api-key:}") String apiKey,
 			@Value("${aliyun.dashscope.image-edit-model:wan2.7-image-pro}") String model,
 			@Value("${aliyun.dashscope.image-edit-size:2K}") String size,
-			@Value("${aliyun.dashscope.base-url:}") String baseUrl) {
+			@Value("${aliyun.dashscope.base-url:}") String baseUrl,
+			com.example.demo.guard.UpstreamGuard upstreamGuard) {
 		this.apiKey = apiKey;
 		this.model = model;
 		this.size = size;
 		this.baseUrl = baseUrl;
+		this.upstreamGuard = upstreamGuard;
 	}
 
+	/** 图片编辑按张计费；连续失败时熔断快速失败，避免烧配额。 */
 	public GeneratedImage edit(List<MediaContent> images, String instruction) {
 		if (apiKey == null || apiKey.isBlank()) {
 			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE, "请先配置 DASHSCOPE_API_KEY");
@@ -53,6 +57,10 @@ public class ImageEditingService {
 		List<MediaContent> selected = images.stream().limit(3).toList();
 		long inputBytes = selected.stream().mapToLong(item -> item.data().length).sum();
 		if (inputBytes > MAX_INPUT_BYTES) throw new IllegalArgumentException("待编辑图片总大小不能超过 20MB");
+		return upstreamGuard.call("image-editing", () -> doEdit(selected, instruction, inputBytes));
+	}
+
+	private GeneratedImage doEdit(List<MediaContent> selected, String instruction, long inputBytes) {
 		configureEndpoint();
 		List<Map<String, Object>> content = new ArrayList<>();
 		content.add(Map.of("text", instruction.trim()));

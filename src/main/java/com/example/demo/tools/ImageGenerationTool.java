@@ -12,7 +12,7 @@ import com.google.gson.JsonParser;
 public class ImageGenerationTool implements AssistantTool {
 	private static final FunctionDefinition DEFINITION = FunctionDefinition.builder()
 			.name("generate_image")
-			.description("当用户明确要求生成、绘制或制作一张新图片时调用。仅讨论图片知识时不要调用。")
+			.description("从零生成一张新图片，仅在用户明确要求生成、绘制或制作新图片时调用。修改用户已有图片应调用图片编辑工具；仅讨论图片知识时不要调用。")
 			.parameters(JsonParser.parseString("""
 					{"type":"object","properties":{"prompt":{"type":"string","description":"适合文生图模型的完整中文提示词，包含主体、构图、风格、色彩和光线"}},"required":["prompt"],"additionalProperties":false}
 					""").getAsJsonObject())

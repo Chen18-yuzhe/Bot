@@ -32,7 +32,9 @@ public class AudioTranscriptionTool implements AssistantTool {
 			temporary = Files.createTempFile("tool-audio-", extension(audio.mimeType()));
 			Files.write(temporary, audio.data());
 			String transcript = service.recognize(temporary.toFile());
-			return ToolResult.text("语音识别结果：\n" + transcript);
+			return transcript == null || transcript.isBlank()
+					? ToolResult.noResult("音频中没有识别到有效文字。")
+					: ToolResult.text("语音识别结果：\n" + transcript);
 		} catch (java.io.IOException error) {
 			throw new IllegalStateException("无法准备音频识别文件", error);
 		} finally {

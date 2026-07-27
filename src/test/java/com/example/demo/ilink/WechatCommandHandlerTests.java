@@ -9,7 +9,8 @@ import org.junit.jupiter.api.Test;
 class WechatCommandHandlerTests {
 
 	private final WechatCommandHandler handler = new WechatCommandHandler(
-			"qwen-test", "configured-key", "");
+			"qwen-test", "configured-key", "", "https://stocktrace.test", "bot-token",
+			"http://app:3000", "internal-token");
 
 	@Test
 	void shouldHandleWechatCommands() {
@@ -17,7 +18,17 @@ class WechatCommandHandlerTests {
 		assertEquals("当前版本：1.1", handler.handle("/version"));
 		assertTrue(handler.handle("/status").contains("千问 API Key：已配置"));
 		assertTrue(handler.handle("/status").contains("和风天气 API Key：未配置"));
+		assertTrue(handler.handle("/status").contains("股票数据服务：已配置"));
+		assertTrue(handler.handle("/status").contains("股价预警服务：已配置"));
 		assertNull(handler.handle("普通问题"));
+	}
+
+	@Test
+	void shouldReportMissingStockServiceConfiguration() {
+		WechatCommandHandler unconfigured = new WechatCommandHandler(
+				"qwen-test", "configured-key", "", "", "", "", "");
+		assertTrue(unconfigured.handle("/status").contains("股票数据服务：未配置"));
+		assertTrue(unconfigured.handle("/status").contains("股价预警服务：未配置"));
 	}
 
 	@Test

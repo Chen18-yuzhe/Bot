@@ -50,7 +50,7 @@ public class ReminderTool implements AssistantTool {
 
 	private ToolResult list(ToolContext context) {
 		var reminders = service.list(context.sessionId());
-		if (reminders.isEmpty()) return ToolResult.text("当前没有待执行提醒。");
+		if (reminders.isEmpty()) return ToolResult.noResult("当前没有待执行提醒。");
 		StringBuilder text = new StringBuilder("待执行提醒：\n");
 		for (var item : reminders) {
 			text.append("- ID=").append(item.id()).append("，时间=")
@@ -63,7 +63,8 @@ public class ReminderTool implements AssistantTool {
 
 	private ToolResult cancel(JsonNode arguments, ToolContext context) {
 		String id = required(arguments, "id");
-		return ToolResult.text(service.cancel(context.sessionId(), id) ? "提醒已取消。" : "没有找到该提醒，或它不属于当前用户。");
+		return service.cancel(context.sessionId(), id) ? ToolResult.text("提醒已取消。")
+				: ToolResult.noResult("没有找到该提醒，或它不属于当前用户。");
 	}
 
 	private static ZonedDateTime parseTime(String value) {

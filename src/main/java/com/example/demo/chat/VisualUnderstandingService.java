@@ -36,18 +36,18 @@ public class VisualUnderstandingService {
 			""";
 
 	private final String apiKey;
-	private final String model;
 	private final float videoFps;
 	private final String baseUrl;
+	private final DashScopeModelFallback modelFallback;
 
 	public VisualUnderstandingService(@Value("${aliyun.dashscope.api-key:}") String apiKey,
-			@Value("${aliyun.dashscope.model:qwen3.7-plus}") String model,
 			@Value("${aliyun.dashscope.video-fps:2}") float videoFps,
-			@Value("${aliyun.dashscope.base-url:}") String baseUrl) {
+			@Value("${aliyun.dashscope.base-url:}") String baseUrl,
+			DashScopeModelFallback modelFallback) {
 		this.apiKey = apiKey;
-		this.model = model;
 		this.videoFps = Math.max(0.1f, Math.min(10f, videoFps));
 		this.baseUrl = baseUrl;
+		this.modelFallback = modelFallback;
 	}
 
 	public String analyze(List<MediaContent> media) {
@@ -68,17 +68,14 @@ public class VisualUnderstandingService {
 				.role(Role.USER.getValue())
 				.content(content)
 				.build();
-		MultiModalConversationParam request = MultiModalConversationParam.builder()
-				.apiKey(apiKey)
-				.model(model)
-				.message(userMessage)
-				.maxTokens(1600)
-				.build();
-
 		configureEndpoint();
-		log.info("正在调用千问视觉模型：{}，媒体数量={}", model, media.size());
 		try {
-			MultiModalConversationResult response = new MultiModalConversation().call(request);
+			MultiModalConversationResult response = modelFallback.call("图片或视频识别", model -> {
+				log.info("正在调用千问视觉模型：{}，媒体数量={}", model, media.size());
+				MultiModalConversationParam request = MultiModalConversationParam.builder()
+						.apiKey(apiKey).model(model).message(userMessage).maxTokens(1600).build();
+				return new MultiModalConversation().call(request);
+			});
 			Object text = response.getOutput().getChoices().get(0).getMessage().getContent().stream()
 					.filter(part -> part.containsKey("text"))
 					.map(part -> part.get("text"))
@@ -88,6 +85,8 @@ public class VisualUnderstandingService {
 				throw new IllegalStateException("视觉模型没有返回文本内容");
 			}
 			return text.toString().trim();
+		} catch (ApplicationException exception) {
+			throw exception;
 		} catch (Exception exception) {
 			log.error("千问视觉模型调用失败：{}", exception.getMessage(), exception);
 			throw new ApplicationException(HttpStatus.BAD_GATEWAY, "图片或视频识别失败，请稍后再试", exception);

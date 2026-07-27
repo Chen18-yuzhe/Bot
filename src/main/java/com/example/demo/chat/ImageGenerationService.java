@@ -33,18 +33,22 @@ public class ImageGenerationService {
 	private final String size;
 	private final String baseUrl;
 	private final HttpClient httpClient;
+	private final com.example.demo.guard.UpstreamGuard upstreamGuard;
 
 	public ImageGenerationService(@Value("${aliyun.dashscope.api-key:}") String apiKey,
 			@Value("${aliyun.dashscope.image-model:wan2.7-image-pro}") String model,
 			@Value("${aliyun.dashscope.image-size:2K}") String size,
-			@Value("${aliyun.dashscope.base-url:}") String baseUrl) {
+			@Value("${aliyun.dashscope.base-url:}") String baseUrl,
+			com.example.demo.guard.UpstreamGuard upstreamGuard) {
 		this.apiKey = apiKey;
 		this.model = model;
 		this.size = size;
 		this.baseUrl = baseUrl;
 		this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
+		this.upstreamGuard = upstreamGuard;
 	}
 
+	/** 万相生图按张计费；连续失败时熔断快速失败，避免烧配额。 */
 	public GeneratedImage generate(String prompt) {
 		if (apiKey == null || apiKey.isBlank()) {
 			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE, "请先配置环境变量 DASHSCOPE_API_KEY");
@@ -52,6 +56,10 @@ public class ImageGenerationService {
 		if (prompt == null || prompt.isBlank()) {
 			throw new ApplicationException(HttpStatus.BAD_REQUEST, "生图提示词不能为空");
 		}
+		return upstreamGuard.call("image-generation", () -> doGenerate(prompt));
+	}
+
+	private GeneratedImage doGenerate(String prompt) {
 		configureEndpoint();
 		ImageGenerationMessage message = ImageGenerationMessage.builder()
 				.role("user")
