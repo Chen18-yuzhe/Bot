@@ -337,25 +337,17 @@ java -jar "D:\demo\target\wechat-agent-platform-1.0.0-boot.jar" `
 
 ## 11. 服务器部署与运维
 
-### 11.1 首次安装
+### 11.1 安装与更新
 
-本地构建完成后运行：
-
-```powershell
-.\deploy-alibaba.ps1
-```
-
-脚本会上传 JAR 和安装器。服务器安装器负责准备 Java 21、Redis、服务账号、环境文件和 systemd 服务。
-
-### 11.2 更新部署
+统一运行：
 
 ```powershell
-.\deploy-latest.ps1
+.\deploy.ps1
 ```
 
-更新脚本会自动计算当前 JAR 的 SHA-256，上传最新 JAR、准备 Redis、替换程序、重启服务，并强制校验上传文件和安装文件的哈希，同时输出服务状态和近期日志。
+脚本会先执行完整测试和覆盖率门禁，再上传 JAR、安装器和线上验证脚本。服务器安装器负责准备 Java 21、Redis、服务账号、环境文件和 systemd 服务；发布后自动校验制品哈希、Actuator、Redis、天气、模型与 Agent 接口。
 
-### 11.3 常用服务器命令
+### 11.2 常用服务器命令
 
 ```bash
 systemctl status wechat-agent-platform --no-pager
@@ -363,14 +355,13 @@ systemctl restart wechat-agent-platform
 journalctl -u wechat-agent-platform -n 100 --no-pager
 journalctl -u wechat-agent-platform -f
 redis-cli ping
-redis-cli --scan --pattern 'demo-assistant:conversation:*'
-redis-cli --scan --pattern 'demo-assistant:reminder:*'
+redis-cli --scan --pattern 'wechat-agent:*'
 sha256sum /opt/wechat-agent-platform/wechat-agent-platform.jar
 ```
 
 Redis 应只监听本机或可信私网，不能把 6379 端口暴露到公网。
 
-### 11.4 运行监控
+### 11.3 运行监控
 
 ```bash
 curl -H 'X-Admin-Token: 你的令牌' http://127.0.0.1:8080/api/admin/status
@@ -386,13 +377,13 @@ curl -H 'X-Admin-Token: 你的令牌' http://127.0.0.1:8080/api/admin/status
 .\mvnw.cmd test
 ```
 
-在线冒烟测试：
+线上验证随部署自动执行，也可以在服务器单独运行：
 
-```powershell
-.\smoke-live.ps1
+```bash
+EXPECTED_SHA256=<本地制品哈希> bash /tmp/verify-production.sh
 ```
 
-冒烟测试覆盖服务状态、普通对话、实时天气、三日预报、图片生成、TTS、ASR、联网搜索、知识库检索、提醒列表、管理状态和 Function Calling 日志。图片编辑、文档附件处理与知识库导入需要通过微信发送真实附件验证。脚本会通过 SSH 连接服务器，需要手动输入服务器密码。
+候选版本的完整外部能力测试位于 `deploy/smoke-candidate.sh`，覆盖 Key、天气、地图、搜索、图片、TTS、ASR、RAG、提醒、Agent 与监控指标。
 
 ## 13. 开发约定与注意事项
 

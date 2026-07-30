@@ -133,7 +133,7 @@ pass tts
 
 curl --fail --silent --show-error --max-time 120 \
   -X POST "${BASE}/api/audio/recognize" \
-  -F "file=@/tmp/nihao-test.wav" > "${WORK_DIR}/asr.json"
+  -F "file=@${WORK_DIR}/tts.wav" > "${WORK_DIR}/asr.json"
 json_assert "${WORK_DIR}/asr.json" 'isinstance(data.get("text"), str) and len(data["text"].strip()) > 0'
 pass asr
 

@@ -15,8 +15,6 @@
 - **可观测与安全**：私有管理台展示 Agent Trace、工具指标、P95/P99、用量和审计；包含限流、熔断、模型降级及日志脱敏。
 - **工程化验证**：Maven Wrapper、JUnit 5、Mockito、JaCoCo 门禁、GitHub Actions 和容器化部署。
 
-![私有管理台登录与工作区](design-qa-comparison.png)
-
 ## 架构
 
 ```mermaid
@@ -68,6 +66,14 @@ docker compose up --build
 
 服务仅映射到本机 `127.0.0.1:8080`，Redis 不暴露宿主机端口。
 
+## 服务器发布
+
+统一发布入口会执行构建与覆盖率门禁、上传制品、安装或更新 systemd 服务，并校验线上健康状态和制品哈希：
+
+```powershell
+.\deploy.ps1
+```
+
 ## 测试与质量门禁
 
 ```powershell
@@ -102,8 +108,7 @@ docker compose up --build
 - [旅游 Agent 与票务边界](TRAVEL-AGENT.md)
 - [Function Calling 开发规范](FUNCTION-CALLING.md)
 - [微信 iLink 接入](ILINK-README.md)
-- [RAG 实现笔记](docs/RAG-NOTES.md)
-- [部署与交接](PROJECT-HANDOFF.md)
+- [Redis 会话设计](REDIS-MEMORY.md)
 
 ## 构建产物
 

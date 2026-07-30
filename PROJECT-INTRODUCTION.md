@@ -158,8 +158,6 @@
 
 控制台使用 `ADMIN_API_TOKEN` 验证管理权限。
 
-![控制台登录页](design-qa-login.png)
-
 登录流程：
 
 1. 管理员输入 API Token，也可以直接粘贴 `ADMIN_API_TOKEN=...` 环境变量行。
@@ -939,19 +937,17 @@ target/wechat-agent-platform-1.0.0-boot.jar
 ### 20.3 更新服务器
 
 ```powershell
-.\deploy-latest.ps1
+.\deploy.ps1
 ```
 
 部署过程包括：
 
 1. 计算本地 JAR SHA-256。
-2. 上传 JAR 和服务器配置脚本。
-3. 校验上传文件哈希。
-4. 更新 Redis 和环境配置。
-5. 保留旧 JAR 作为回滚副本。
-6. 安装新 JAR。
-7. 重启 systemd 服务。
-8. 检查 Actuator、Redis、日志和安装文件哈希。
+2. 上传 JAR、安装器和验证脚本。
+3. 准备或复用 Java、Redis 与环境配置。
+4. 安装新 JAR 并平滑切换 systemd 服务。
+5. 失败时恢复旧服务。
+6. 检查 Actuator、Redis、外部能力和安装文件哈希。
 
 服务器关键路径：
 
@@ -1143,6 +1139,5 @@ Agent 的状态、预算、权限、超时和恢复由程序控制，模型只�
 - [完整技术文档](TECHNICAL-DOCUMENTATION.md)
 - [Agent 平台设计与演示](AGENT-PLATFORM.md)
 - [旅游 Agent](TRAVEL-AGENT.md)
-- [RAG 学习笔记](docs/RAG-NOTES.md)
 - [Function Calling 开发规范](FUNCTION-CALLING.md)
-- [部署与交接说明](PROJECT-HANDOFF.md)
+- [Redis 会话设计](REDIS-MEMORY.md)
