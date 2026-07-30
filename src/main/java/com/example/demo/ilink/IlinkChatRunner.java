@@ -22,6 +22,7 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
+import com.example.demo.agent.AgentModeHandler;
 import com.example.demo.chat.AssistantService;
 import com.example.demo.chat.AssistantReply;
 import com.example.demo.chat.ImageReplyPolicy;
@@ -33,8 +34,6 @@ import com.example.demo.ApplicationException;
 import com.example.demo.document.GeneratedDocument;
 import com.example.demo.document.DocumentReplyPolicy;
 import com.example.demo.reminder.ReminderService;
-import com.example.demo.alert.AlertPushService;
-import com.example.demo.briefing.BriefingService;
 import com.example.demo.guard.UserRateLimiter;
 import com.example.demo.logging.RequestIds;
 import com.example.demo.monitoring.ConversationAuditService;
@@ -57,10 +56,9 @@ public class IlinkChatRunner {
 	private final AssistantService assistantService;
 	private final IlinkSessionStore sessionStore;
 	private final WechatCommandHandler commandHandler;
+	private final AgentModeHandler agentModeHandler;
 	private final ReminderService reminderService;
 	private final VoicePreferenceService voicePreferenceService;
-	private final AlertPushService alertPushService;
-	private final BriefingService briefingService;
 	private final UserRateLimiter rateLimiter;
 	private final ConversationAuditService auditService;
 	private final long minReplyDelayMs;
@@ -93,9 +91,9 @@ public class IlinkChatRunner {
 	private final Map<String, AccountRuntime> accounts = new ConcurrentHashMap<>();
 
 	public IlinkChatRunner(AssistantService assistantService, IlinkSessionStore sessionStore,
-			WechatCommandHandler commandHandler, ReminderService reminderService,
+			WechatCommandHandler commandHandler, AgentModeHandler agentModeHandler,
+			ReminderService reminderService,
 			VoicePreferenceService voicePreferenceService,
-			AlertPushService alertPushService, BriefingService briefingService,
 			UserRateLimiter rateLimiter, ConversationAuditService auditService,
 			@Value("${assistant.ilink.min-reply-delay-ms:13000}") long minReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
@@ -108,10 +106,9 @@ public class IlinkChatRunner {
 		this.assistantService = assistantService;
 		this.sessionStore = sessionStore;
 		this.commandHandler = commandHandler;
+		this.agentModeHandler = agentModeHandler;
 		this.reminderService = reminderService;
 		this.voicePreferenceService = voicePreferenceService;
-		this.alertPushService = alertPushService;
-		this.briefingService = briefingService;
 		this.rateLimiter = rateLimiter;
 		this.auditService = auditService;
 		this.minReplyDelayMs = Math.max(0, minReplyDelayMs);
@@ -128,7 +125,7 @@ public class IlinkChatRunner {
 	@EventListener(ApplicationReadyEvent.class)
 	public void start() {
 		reminderService.setNotifier(this::deliverReminder);
-		alertPushService.setSender(this::pushText);
+		agentModeHandler.setCompletionNotifier((sessionId, text) -> pushText(sessionId, text));
 		Map<String, ResumeContext> saved = sessionStore.loadAll();
 		if (saved.isEmpty()) {
 			startAccount("default", null, true);
@@ -140,7 +137,6 @@ public class IlinkChatRunner {
 	@PreDestroy
 	public void stop() {
 		reminderService.setNotifier(null);
-		alertPushService.setSender(null);
 		batchExecutor.shutdownNow();
 		new ArrayList<>(accounts.values()).forEach(this::closeAccount);
 	}
@@ -497,6 +493,9 @@ public class IlinkChatRunner {
 			String commandReply = media.isEmpty() ? commandHandler.handle(question) : null;
 			if (commandReply != null) {
 				answer = commandReply;
+			} else if (media.isEmpty()
+					&& (commandReply = agentModeHandler.handle(sessionId, question)) != null) {
+				answer = commandReply;
 			} else if (!isResetCommand(question) && !rateLimiter.tryAcquire(sessionId)) {
 				// 计费上游（生图/搜索/大模型）经不起单用户刷屏；命令与重置不占额度。
 				log.warn("用户消息触发限流：会话={}，限额={}/分钟", sessionId, rateLimiter.perMinute());
@@ -583,27 +582,14 @@ public class IlinkChatRunner {
 	}
 
 	private boolean deliverReminder(ReminderService.Reminder reminder) {
-		// briefing 类型的提醒在投递时现场生成内容（天气+自选股+热搜）。
-		String text;
-		if (reminder.isBriefing()) {
-			try {
-				text = briefingService.compose(reminder.userId(), reminder.content());
-			} catch (RuntimeException error) {
-				log.warn("简报生成失败，本次改发降级提示：id={}，原因={}", reminder.id(), error.getMessage());
-				text = "📮 今天的简报生成失败了，可以直接问我天气、自选股行情或热搜。";
-			}
-		} else {
-			text = "⏰ 提醒：" + reminder.content();
-		}
+		String text = "⏰ 提醒：" + reminder.content();
 		boolean delivered = pushText(reminder.userId(), text);
 		if (delivered) {
-			log.info("已通过 iLink 发送{}：id={}，用户={}",
-					reminder.isBriefing() ? "每日简报" : "定时提醒", reminder.id(), reminder.userId());
+			log.info("已通过 iLink 发送定时提醒：id={}，用户={}", reminder.id(), reminder.userId());
 		}
 		return delivered;
 	}
-
-	/** 主动推送入口：定时提醒、每日简报和股价预警共用。 */
+	/** 主动推送入口：定时提醒使用。 */
 	private boolean pushText(String sessionId, String text) {
 		SessionAddress address = parseSessionId(sessionId);
 		AccountRuntime runtime = accounts.get(address.accountId());
@@ -820,6 +806,19 @@ public class IlinkChatRunner {
 		return runtime.view(true);
 	}
 
+	/** Creates an account while preserving the optional admin display name. */
+	public synchronized AccountView createAccount(String displayName) {
+		AccountView created = createAccount();
+		return updateAccountDisplayName(created.accountId(), displayName);
+	}
+
+	public synchronized AccountView updateAccountDisplayName(String accountId, String displayName) {
+		AccountRuntime runtime = accounts.get(accountId);
+		if (runtime == null) throw new IllegalArgumentException("iLink 账户不存在：" + accountId);
+		runtime.displayName = displayName == null || displayName.isBlank() ? null : displayName.trim();
+		return runtime.view(false);
+	}
+
 	public List<AccountView> accountViews() {
 		return accounts.values().stream()
 				.map(runtime -> runtime.view(false))
@@ -1002,7 +1001,7 @@ public class IlinkChatRunner {
 	public enum AccountStatus { STARTING, WAITING_FOR_SCAN, ONLINE, OFFLINE, ERROR, DELETED }
 
 	public record AccountView(String accountId, AccountStatus status, String botId,
-			String ownerUserId, String qrCode, String error) { }
+			String ownerUserId, String qrCode, String error, String displayName) { }
 
 	private record SessionAddress(String accountId, String peerUserId) { }
 
@@ -1015,6 +1014,7 @@ public class IlinkChatRunner {
 		private volatile AccountStatus status = AccountStatus.STARTING;
 		private volatile String qrCode;
 		private volatile String error;
+		private volatile String displayName;
 
 		private AccountRuntime(String accountId, ResumeContext resumeContext, boolean printQr) {
 			this.accountId = accountId;
@@ -1035,7 +1035,7 @@ public class IlinkChatRunner {
 			String userId = context == null || context.getLoginContext() == null
 					? null : context.getLoginContext().getUserId();
 			return new AccountView(accountId, status, botId, userId,
-					includeQrCode ? qrCode : null, error);
+					includeQrCode ? qrCode : null, error, displayName);
 		}
 	}
 

@@ -28,7 +28,7 @@
 先停止旧程序，再运行最新 JAR：
 
 ```powershell
-java -jar "D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar" `
+java -jar "D:\demo\target\wechat-agent-platform-1.0.0-boot.jar" `
   --assistant.console-enabled=false `
   --assistant.ilink-enabled=true `
   --server.port=8080

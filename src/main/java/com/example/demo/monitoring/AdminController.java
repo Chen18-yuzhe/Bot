@@ -1,7 +1,11 @@
 package com.example.demo.monitoring;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Map;
 
@@ -19,6 +23,7 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 import jakarta.servlet.http.Cookie;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -30,7 +35,11 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.example.demo.ApplicationException;
+import com.example.demo.agent.AgentLoopService;
+import com.example.demo.agent.AgentTask;
+import com.example.demo.agent.AgentTraceEvent;
 import com.example.demo.chat.ConversationMemory;
+import com.example.demo.chat.SqliteConversationStore;
 import com.example.demo.chat.MediaContent;
 import com.example.demo.document.DocumentSummaryService;
 import com.example.demo.knowledge.KnowledgeBaseService;
@@ -43,7 +52,8 @@ import com.example.demo.tools.AssistantToolRegistry;
 @RequestMapping("/api/admin")
 public class AdminController {
 	private static final Logger log = LoggerFactory.getLogger(AdminController.class);
-	private final String token;
+	private static final int MAX_LOG_RESPONSE_BYTES = 2_000_000;
+	private final Path applicationLogFile;
 	private final AssistantToolRegistry registry;
 	private final ToolMetricsService metrics;
 	private final ConversationMemory memory;
@@ -55,15 +65,18 @@ public class AdminController {
 	private final DocumentSummaryService documents;
 	private final AdminSessionService sessions;
 	private final ConversationAuditService audit;
+	private final SqliteConversationStore sqliteConversations;
+	private final AgentLoopService agentLoop;
 
-	public AdminController(@Value("${assistant.admin.token:}") String token,
+	public AdminController(
+			@Value("${assistant.logs.file:/var/lib/wechat-agent-platform/logs/application.log}") String applicationLogFile,
 			AssistantToolRegistry registry, ToolMetricsService metrics, ConversationMemory memory,
 			ReminderService reminders, KnowledgeBaseService knowledgeBase,
 			ObjectProvider<StringRedisTemplate> redisProvider,
 			ObjectProvider<IlinkChatRunner> ilinkRunner,
 			QrCodeSvgService qrCodeSvgService, DocumentSummaryService documents, AdminSessionService sessions,
-			ConversationAuditService audit) {
-		this.token = token == null ? "" : token;
+			ConversationAuditService audit, SqliteConversationStore sqliteConversations, AgentLoopService agentLoop) {
+		this.applicationLogFile = Path.of(applicationLogFile).toAbsolutePath().normalize();
 		this.registry = registry;
 		this.metrics = metrics;
 		this.memory = memory;
@@ -75,6 +88,8 @@ public class AdminController {
 		this.documents = documents;
 		this.sessions = sessions;
 		this.audit = audit;
+		this.sqliteConversations = sqliteConversations;
+		this.agentLoop = agentLoop;
 	}
 
 	@GetMapping(value = "/ilink/console", produces = MediaType.TEXT_HTML_VALUE)
@@ -125,16 +140,27 @@ public class AdminController {
 	public ResponseEntity<String> recentLogs(@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
 			@RequestParam(defaultValue = "24") int hours) {
 		authorizeIlink(providedToken);
-		int boundedHours = Math.max(1, Math.min(24, hours));
 		try {
-			Process process = new ProcessBuilder("journalctl", "-u", "demo-assistant", "--since", boundedHours + " hours ago",
-					"--no-pager", "-o", "short-iso").redirectErrorStream(true).start();
-			byte[] bytes = process.getInputStream().readNBytes(2_000_000);
-			if (!process.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly();
-			return ResponseEntity.ok().header("Content-Disposition", "inline; filename=demo-assistant-last-24h.log")
-					.body(new String(bytes, StandardCharsets.UTF_8));
+			return ResponseEntity.ok().header("Content-Disposition", "inline; filename=demo-assistant-all-bots.log")
+					.body(readApplicationLogTail());
 		} catch (Exception error) {
-			throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "无法读取服务日志：" + error.getMessage());
+			throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "无法读取应用日志：" + error.getMessage());
+		}
+	}
+
+	private String readApplicationLogTail() throws java.io.IOException {
+		if (!Files.isRegularFile(applicationLogFile)) {
+			return "暂时没有应用日志；请确认服务已重启并产生请求。";
+		}
+		try (FileChannel channel = FileChannel.open(applicationLogFile, StandardOpenOption.READ)) {
+			long size = channel.size();
+			int length = (int) Math.min(size, MAX_LOG_RESPONSE_BYTES);
+			channel.position(Math.max(0, size - length));
+			ByteBuffer buffer = ByteBuffer.allocate(length);
+			while (buffer.hasRemaining() && channel.read(buffer) != -1) {
+				// Continue until the requested tail has been read.
+			}
+			return StandardCharsets.UTF_8.decode((ByteBuffer) buffer.flip()).toString();
 		}
 	}
 
@@ -177,6 +203,8 @@ public class AdminController {
 	}
 
 	public record LoginRequest(String token) { }
+	public record AccountCreateRequest(String displayName) { }
+	public record AccountNameUpdate(String displayName) { }
 	@GetMapping("/ilink/accounts")
 	public List<IlinkChatRunner.AccountView> ilinkAccounts(
 			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken) {
@@ -186,9 +214,19 @@ public class AdminController {
 
 	@PostMapping("/ilink/accounts")
 	public IlinkChatRunner.AccountView createIlinkAccount(
-			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken) {
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@org.springframework.web.bind.annotation.RequestBody(required = false) AccountCreateRequest request) {
 		authorizeIlink(providedToken);
-		return requiredIlinkRunner().createAccount();
+		return requiredIlinkRunner().createAccount(request == null ? null : request.displayName());
+	}
+
+	@PatchMapping("/ilink/accounts/{accountId}")
+	public IlinkChatRunner.AccountView updateIlinkAccountName(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@PathVariable String accountId,
+			@org.springframework.web.bind.annotation.RequestBody AccountNameUpdate request) {
+		authorizeIlink(providedToken);
+		return requiredIlinkRunner().updateAccountDisplayName(accountId, request == null ? null : request.displayName());
 	}
 
 	@GetMapping("/ilink/accounts/{accountId}")
@@ -251,7 +289,7 @@ public class AdminController {
 	}
 
 	private void authorizeIlink(String provided) {
-		if (token.isBlank()) {
+		if (!sessions.isConfigured()) {
 			throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
 					"管理微信账户前必须配置 ADMIN_API_TOKEN");
 		}
@@ -306,6 +344,100 @@ public class AdminController {
 	public record AuditView(boolean enabled, List<ConversationAuditService.AuditEntry> entries) { }
 	public record AuditToggle(Boolean enabled) { }
 
+	/** All Agent tasks are admin-visible and include the originating WeChat session/user identifier. */
+	@GetMapping("/ops/agent-tasks")
+	public List<AgentTask> agentTasks(@RequestHeader(name = "X-Admin-Token", required = false) String providedToken) {
+		authorizeIlink(providedToken);
+		return agentLoop.list(null);
+	}
+
+	@GetMapping("/ops/agent-tasks/{taskId}/trace")
+	public List<AgentTraceEvent> agentTaskTrace(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@PathVariable String taskId) {
+		authorizeIlink(providedToken);
+		return agentLoop.trace(taskId);
+	}
+
+	@PostMapping("/ops/agent-tasks/{taskId}/{action:pause|resume|cancel|retry}")
+	public AgentTask controlAgentTask(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@PathVariable String taskId, @PathVariable String action) {
+		authorizeIlink(providedToken);
+		return switch (action) {
+			case "pause" -> agentLoop.pause(taskId);
+			case "resume" -> agentLoop.resume(taskId);
+			case "cancel" -> agentLoop.cancel(taskId);
+			case "retry" -> agentLoop.retry(taskId);
+			default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "未知 Agent 操作");
+		};
+	}
+
+	@DeleteMapping("/ops/agent-tasks/{taskId}")
+	public Map<String, Boolean> deleteAgentTask(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@PathVariable String taskId) {
+		authorizeIlink(providedToken);
+		agentLoop.delete(taskId);
+		return Map.of("deleted", true);
+	}
+
+	@PostMapping("/ops/agent-tasks/{taskId}/human-input")
+	public AgentTask submitAgentHumanInput(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@PathVariable String taskId,
+			@org.springframework.web.bind.annotation.RequestBody AgentHumanInput request) {
+		authorizeIlink(providedToken);
+		return agentLoop.submitHumanInput(taskId, request == null ? null : request.input());
+	}
+
+	public record AgentHumanInput(String input) { }
+
+	@GetMapping("/ops/conversations")
+	public List<SqliteConversationStore.ConversationView> conversationContexts(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@RequestParam String accountId, @RequestParam(defaultValue = "100") int limit) {
+		authorizeIlink(providedToken);
+		requiredIlinkRunner().accountView(accountId, false);
+		return sqliteConversations.listByAccount(accountId, limit, memory.retentionCutoffMillis());
+	}
+
+	@DeleteMapping("/ops/conversations")
+	public Map<String, Object> deleteConversationContext(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@RequestParam String sessionId) {
+		authorizeIlink(providedToken);
+		memory.clear(sessionId);
+		return Map.of("deleted", true, "sessionId", sessionId);
+	}
+
+	@PatchMapping("/ops/conversations")
+	public Map<String, Object> updateConversationContext(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@org.springframework.web.bind.annotation.RequestBody ConversationSummaryUpdate request) {
+		authorizeIlink(providedToken);
+		if (request == null || request.sessionId() == null || request.sessionId().isBlank()) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sessionId is required");
+		}
+		if (!memory.updateSummary(request.sessionId(), request.summary())) {
+			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在，或 SQLite 当前不可用");
+		}
+		return Map.of("updated", true, "sessionId", request.sessionId());
+	}
+
+	@DeleteMapping("/ops/accounts/{accountId}/conversations")
+	public Map<String, Object> deleteAccountConversationContexts(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@PathVariable String accountId) {
+		authorizeIlink(providedToken);
+		requiredIlinkRunner().accountView(accountId, false);
+		int deleted = memory.clearByAccount(accountId);
+		return Map.of("deleted", true, "accountId", accountId, "count", deleted);
+	}
+
+	public record ConversationSummaryUpdate(String sessionId, String summary) { }
+
+
 	@GetMapping("/status")
 	public Status status(@RequestHeader(name = "X-Admin-Token", required = false) String providedToken) {
 		authorize(providedToken);
@@ -317,10 +449,9 @@ public class AdminController {
 	}
 
 	private void authorize(String provided) {
-		if (token.isBlank()) return;
-		byte[] expected = token.getBytes(StandardCharsets.UTF_8);
-		byte[] actual = (provided == null ? "" : provided).getBytes(StandardCharsets.UTF_8);
-		if (!MessageDigest.isEqual(expected, actual)) {
+		if (!sessions.isConfigured()) return;
+		if (sessions.isActive(currentSessionId())) return;
+		if (!sessions.isValidToken(provided)) {
 			log.warn("管理接口鉴权失败");
 			throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "管理令牌无效");
 		}

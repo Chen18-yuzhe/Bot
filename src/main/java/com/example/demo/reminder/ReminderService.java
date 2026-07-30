@@ -50,10 +50,6 @@ public class ReminderService {
 		return create(userId, content, triggerAt, recurrence, null);
 	}
 
-	/**
-	 * type=null 为普通文字提醒；type="briefing" 的提醒在投递时由通知器现场生成
-	 * 内容（早报/收盘报），content 存放生成参数（如城市）。
-	 */
 	public Reminder create(String userId, String content, ZonedDateTime triggerAt, Recurrence recurrence,
 			String type) {
 		if (!enabled) throw new IllegalStateException("提醒功能未启用");
@@ -234,9 +230,6 @@ public class ReminderService {
 	/** type 为 null 表示普通文字提醒；历史 Redis 数据缺少该字段时反序列化为 null。 */
 	public record Reminder(String id, String userId, String content, long triggerAtMs,
 			Recurrence recurrence, long createdAtMs, long nextAttemptAtMs, String type) {
-		public boolean isBriefing() {
-			return "briefing".equals(type);
-		}
 	}
 	@FunctionalInterface public interface ReminderNotifier { boolean deliver(Reminder reminder); }
 }

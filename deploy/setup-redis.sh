@@ -31,16 +31,21 @@ fi
 systemctl enable --now "${REDIS_SERVICE}"
 redis-cli ping | grep -q PONG
 
-ENV_FILE=/etc/demo-assistant/demo-assistant.env
-install -d -o demo-assistant -g demo-assistant -m 0700 /var/lib/demo-assistant/knowledge
+ENV_FILE=/etc/wechat-agent-platform/wechat-agent-platform.env
+install -d -o wechat-agent-platform -g wechat-agent-platform -m 0700 /var/lib/wechat-agent-platform/knowledge /var/lib/wechat-agent-platform/logs
 touch "${ENV_FILE}"
 grep -q '^REDIS_URL=' "${ENV_FILE}" || echo 'REDIS_URL=redis://127.0.0.1:6379/0' >> "${ENV_FILE}"
 grep -q '^CONVERSATION_REDIS_ENABLED=' "${ENV_FILE}" || echo 'CONVERSATION_REDIS_ENABLED=true' >> "${ENV_FILE}"
 grep -q '^CONVERSATION_TTL_MINUTES=' "${ENV_FILE}" || echo 'CONVERSATION_TTL_MINUTES=1440' >> "${ENV_FILE}"
-grep -q '^KNOWLEDGE_BASE_PATH=' "${ENV_FILE}" || echo 'KNOWLEDGE_BASE_PATH=/var/lib/demo-assistant/knowledge' >> "${ENV_FILE}"
+grep -q '^SQLITE_ENABLED=' "${ENV_FILE}" || echo 'SQLITE_ENABLED=true' >> "${ENV_FILE}"
+grep -q '^SQLITE_DATABASE_PATH=' "${ENV_FILE}" || echo 'SQLITE_DATABASE_PATH=/var/lib/wechat-agent-platform/conversations.db' >> "${ENV_FILE}"
+grep -q '^KNOWLEDGE_BASE_PATH=' "${ENV_FILE}" || echo 'KNOWLEDGE_BASE_PATH=/var/lib/wechat-agent-platform/knowledge' >> "${ENV_FILE}"
+grep -q '^RAG_ENABLED=' "${ENV_FILE}" || echo 'RAG_ENABLED=true' >> "${ENV_FILE}"
+grep -q '^RAG_RETRIEVAL_LIMIT=' "${ENV_FILE}" || echo 'RAG_RETRIEVAL_LIMIT=4' >> "${ENV_FILE}"
+grep -q '^AGENT_STORAGE_FILE=' "${ENV_FILE}" || echo 'AGENT_STORAGE_FILE=/var/lib/wechat-agent-platform/agent-tasks.json' >> "${ENV_FILE}"
 grep -q '^REMINDERS_ENABLED=' "${ENV_FILE}" || echo 'REMINDERS_ENABLED=true' >> "${ENV_FILE}"
 grep -q '^REMINDERS_POLL_MS=' "${ENV_FILE}" || echo 'REMINDERS_POLL_MS=10000' >> "${ENV_FILE}"
-chown root:demo-assistant "${ENV_FILE}"
+chown root:wechat-agent-platform "${ENV_FILE}"
 chmod 0640 "${ENV_FILE}"
 
 echo "Redis PING: $(redis-cli ping)"

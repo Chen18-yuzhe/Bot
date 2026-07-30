@@ -34,7 +34,7 @@ public class DashScopeModelFallback {
 
 	@Autowired
 	public DashScopeModelFallback(@Value("${aliyun.dashscope.model:qwen3.7-plus}") String primaryModel,
-			@Value("${aliyun.dashscope.fallback-models:qwen3.6-flash,qwen3.5-flash,qwen-flash}") String fallbackModels,
+			@Value("${aliyun.dashscope.fallback-models:qwen3.7-plus-2026-05-26,qwen3.6-plus-2026-04-02,qwen3.6-flash-2026-04-16,qwen3.5-plus-2026-02-15,qwen3.5-flash}") String fallbackModels,
 			@Value("${aliyun.dashscope.model-quota-cooldown-seconds:300}") long cooldownSeconds) {
 		this(primaryModel, fallbackModels, Duration.ofSeconds(Math.max(1, cooldownSeconds)));
 	}

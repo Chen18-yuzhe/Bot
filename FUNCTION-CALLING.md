@@ -47,12 +47,8 @@
 - `scientific_calculator(expression, angleUnit, precision)`：本地精确科学计算，默认三角函数使用角度制
 - `calculate_body_fat(gender, heightCm, waistCm, neckCm, hipCm)`：成人美国海军围度法体脂率估算，结果非医疗诊断
 - `lookup_daily_info(category, query, ...)`：联网查询全网热搜、城市 AQI、营养成分、菜谱或中国大陆节假日；返回内容保留来源
-- `query_stock_data(symbol)`：查询 A 股行情与已核验研究摘要（StockTrace Bot 接口）
-- `manage_stock_alert(action, stockCode, ruleType, threshold, ...)`：管理股价预警（StockTrace 内部 API）；触发事件由后台每分钟轮询拉取，推送微信后回执，投递失败自动重试
-- `manage_watchlist(action, symbol)`：自选股增删查与一键批量行情（Redis 按会话隔离），同时是简报和预警的默认标的
-- `manage_briefing(action, time, city)`：订阅/退订每日简报；内容（天气+自选股行情+热搜）在投递时现场生成
 
-所有工具调用都会记录工具名、轮次、成功或失败状态及耗时指标（含 Micrometer P95/P99 与 Redis 用量日桶），但不会记录 API Key 或附件字节。“涨到/跌破某价提醒我”类请求强制路由到 `manage_stock_alert`，不允许落到普通定时提醒。
+所有工具调用都会记录工具名、轮次、成功或失败状态及耗时指标（含 Micrometer P95/P99 与 Redis 用量日桶），但不会记录 API Key 或附件字节。
 
 计费上游（生图、图片编辑、联网搜索）由 `UpstreamGuard` 熔断保护：连续失败后快速失败一段时间再放行探测；参数错误和内容审核拒绝不计入熔断。微信消息入口按用户每分钟限流（`assistant.rate-limit.*`）。
 

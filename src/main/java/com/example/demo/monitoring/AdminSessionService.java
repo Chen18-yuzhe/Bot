@@ -24,9 +24,7 @@ public class AdminSessionService {
 	}
 
 	public String create(String suppliedToken) {
-		String expected = adminToken.trim();
-		String supplied = normalizeCopiedToken(suppliedToken);
-		if (expected.isBlank() || !matches(supplied, expected)) return null;
+		if (!isValidToken(suppliedToken)) return null;
 		byte[] bytes = new byte[32];
 		random.nextBytes(bytes);
 		String id = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
@@ -34,8 +32,14 @@ public class AdminSessionService {
 		return id;
 	}
 
+	public boolean isValidToken(String suppliedToken) {
+		String expected = normalizeCopiedToken(adminToken);
+		String supplied = normalizeCopiedToken(suppliedToken);
+		return !expected.isBlank() && matches(supplied, expected);
+	}
+
 	public boolean isConfigured() {
-		return !adminToken.trim().isBlank();
+		return !normalizeCopiedToken(adminToken).isBlank();
 	}
 
 	public boolean isActive(String sessionId) {
@@ -60,7 +64,10 @@ public class AdminSessionService {
 
 	/** Accept the value itself or a line pasted directly from an environment file. */
 	private static String normalizeCopiedToken(String rawToken) {
-		String value = rawToken == null ? "" : rawToken.trim();
+		// Browser/password-manager/IM clipboard paths can insert zero-width format
+		// characters. They are invisible in a password input and String.trim() does
+		// not remove them, while generated API tokens never rely on these characters.
+		String value = rawToken == null ? "" : rawToken.replaceAll("[\\u200B-\\u200D\\u2060\\uFEFF]", "").trim();
 		if (value.startsWith("export ")) value = value.substring("export ".length()).trim();
 		int separator = value.indexOf('=');
 		if (separator >= 0 && "ADMIN_API_TOKEN".equals(value.substring(0, separator).trim())) {
@@ -70,6 +77,6 @@ public class AdminSessionService {
 				|| (value.startsWith("'") && value.endsWith("'")))) {
 			value = value.substring(1, value.length() - 1);
 		}
-		return value.trim();
+		return value.replaceAll("[\\u200B-\\u200D\\u2060\\uFEFF]", "").trim();
 	}
 }

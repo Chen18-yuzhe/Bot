@@ -25,7 +25,7 @@ public class VoicePreferenceService {
 	private final ObjectMapper objectMapper;
 
 	public VoicePreferenceService(@Value("${aliyun.dashscope.audio.voice:longxiaochun_v2}") String defaultVoice,
-			@Value("${assistant.voice-preferences.storage-file:/var/lib/demo-assistant/voice-preferences.json}") String storageFile,
+			@Value("${assistant.voice-preferences.storage-file:/var/lib/wechat-agent-platform/voice-preferences.json}") String storageFile,
 			ObjectMapper objectMapper) {
 		this.defaultVoice = VOICES.containsKey(defaultVoice) ? defaultVoice : "longxiaochun_v2";
 		this.storageFile = Path.of(storageFile).toAbsolutePath();

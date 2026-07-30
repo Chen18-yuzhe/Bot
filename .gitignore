@@ -24,6 +24,8 @@ hs_err_pid*
 
 # Maven / Spring Boot build output
 target/
+.codex-audit/
+.local-*
 HELP.md
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/

@@ -30,15 +30,15 @@
 git push https://gitee.com/zhangdede_git/ykd-s301-2.git chen:chen
 ```
 
-- 本地最新版已经编译和测试，但**尚未部署到服务器**。
-- 最新 JAR：`D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar`
+- 本地最新版已于 2026-07-30 部署到服务器 `101.200.53.44`，systemd、Actuator、Redis 和 Agent 类型接口均已在线验证。
+- 最新 JAR：`D:\demo\target\wechat-agent-platform-1.0.0-boot.jar`
 - 当前这次构建的 SHA-256（重新打包后可能变化）：
 
 ```text
-312a54631ed224b33d986e0d0551438da2a4ad950ece831353780566d7c747c9
+2e7b08094d0b960aa0f5926becf84e3ce048f6a07130582788fab88496a82c16
 ```
 
-- 最后一轮验证结果：`52` 项测试全部通过，失败 `0`，错误 `0`。
+- 最后一轮验证结果：`178` 项测试全部通过，失败 `0`，错误 `0`；JaCoCo 行覆盖率 `48.43%`，门禁 `45%`。
 - `deploy-latest.ps1` 会在运行时自动计算当前 JAR 的 SHA-256，并校验服务器上传文件和安装文件，不需要手动同步固定哈希。
 
 ## 3. 技术栈
@@ -74,7 +74,8 @@ git push https://gitee.com/zhangdede_git/ykd-s301-2.git chen:chen
 
 ### Function Calling 工具
 
-当前注册了 11 个工具：
+当前注册了 26 个工具。下表是基础通用能力；Agent 与旅行域工具详见
+`AGENT-PLATFORM.md` 和 `TRAVEL-AGENT.md`：
 
 | 工具 | 作用 |
 | --- | --- |
@@ -128,7 +129,7 @@ X-Admin-Token: <ADMIN_API_TOKEN>
 
 ## 6. 重要环境变量
 
-服务器环境文件：`/etc/demo-assistant/demo-assistant.env`
+服务器环境文件：`/etc/wechat-agent-platform/wechat-agent-platform.env`
 
 必要变量：
 
@@ -148,7 +149,7 @@ DASHSCOPE_IMAGE_MODEL=wan2.7-image-pro
 DASHSCOPE_IMAGE_EDIT_MODEL=wan2.7-image-pro
 CONVERSATION_REDIS_ENABLED=true
 CONVERSATION_TTL_MINUTES=1440
-KNOWLEDGE_BASE_PATH=/var/lib/demo-assistant/knowledge
+KNOWLEDGE_BASE_PATH=/var/lib/wechat-agent-platform/knowledge
 REMINDERS_ENABLED=true
 REMINDERS_POLL_MS=10000
 ADMIN_API_TOKEN=
@@ -168,7 +169,7 @@ cd D:\demo
 计算 SHA-256：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 "D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar"
+Get-FileHash -Algorithm SHA256 "D:\demo\target\wechat-agent-platform-1.0.0-boot.jar"
 ```
 
 服务器：`root@101.200.53.44`
@@ -180,7 +181,7 @@ cd D:\demo
 .\deploy-latest.ps1
 ```
 
-该脚本会上传 JAR 和 Redis 配置脚本、替换 `/opt/demo-assistant/demo-assistant.jar`、重启服务，并输出哈希、服务状态和日志。脚本需要手动输入服务器密码。
+该脚本会上传 JAR 和 Redis 配置脚本、替换 `/opt/wechat-agent-platform/wechat-agent-platform.jar`、重启服务，并输出哈希、服务状态和日志。脚本需要手动输入服务器密码。
 
 在线冒烟测试：
 
@@ -191,12 +192,12 @@ cd D:\demo
 服务器常用命令：
 
 ```bash
-systemctl status demo-assistant --no-pager
-systemctl restart demo-assistant
-journalctl -u demo-assistant -n 100 --no-pager
-journalctl -u demo-assistant -f
+systemctl status wechat-agent-platform --no-pager
+systemctl restart wechat-agent-platform
+journalctl -u wechat-agent-platform -n 100 --no-pager
+journalctl -u wechat-agent-platform -f
 redis-cli ping
-sha256sum /opt/demo-assistant/demo-assistant.jar
+sha256sum /opt/wechat-agent-platform/wechat-agent-platform.jar
 ```
 
 ## 8. 已知限制和注意事项
@@ -209,7 +210,7 @@ sha256sum /opt/demo-assistant/demo-assistant.jar
 - 近期附件缓存在单机内存中，不适合多实例部署。
 - HTTP `/api/chat` 使用固定测试会话，不应作为正式多用户入口。
 - 本地测试时若 Redis 没启动，日志会出现一次降级警告，这是预期行为。
-- 当前本地代码尚未进行本轮服务器在线验证；部署后应运行 `smoke-live.ps1`，并在微信中人工验证图片编辑、文档导入知识库和到期提醒。
+- 本轮已验证服务器健康检查、Redis、制品哈希、微信会话恢复和 5 类 Agent 注册；图片编辑、文档导入知识库和到期提醒仍建议在微信中做一次人工端到端验收。
 
 ## 9. 新对话建议的第一条指令
 

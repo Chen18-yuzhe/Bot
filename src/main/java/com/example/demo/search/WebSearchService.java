@@ -22,6 +22,8 @@ import com.example.demo.guard.UpstreamGuard;
 
 @Service
 public class WebSearchService {
+	/** A machine-readable marker for callers that require an externally sourced URL. */
+	public static final String NO_VERIFIED_SOURCES = "NO_VERIFIED_SOURCES";
 	private static final Logger log = LoggerFactory.getLogger(WebSearchService.class);
 	private final String apiKey;
 	private final String baseUrl;
@@ -75,7 +77,13 @@ public class WebSearchService {
 					}
 				});
 			}
-			if (!sources.isEmpty()) answer += "\n\n来源：\n" + String.join("\n", sources);
+			if (sources.isEmpty()) {
+				// The model's prose is not evidence for a purchasable page. Returning a
+				// marker lets the Agent stop rather than repeatedly reformulating the
+				// same search for several minutes.
+				return NO_VERIFIED_SOURCES + "\n联网搜索未返回可验证的来源链接。";
+			}
+			answer += "\n\n来源：\n" + String.join("\n", sources);
 			long durationMs = (System.nanoTime() - startedAt) / 1_000_000L;
 			log.info("联网搜索完成：查询字数={}，来源数量={}，耗时={}毫秒", query.length(), sources.size(), durationMs);
 			return answer.isBlank() ? "联网搜索没有返回有效结果。" : answer;

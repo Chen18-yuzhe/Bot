@@ -207,7 +207,7 @@ Spring 会自动注册该工具，不需要修改中央 `switch`。新功能默�
 
 ### 6.2 故障降级
 
-Redis 不可用时，服务继续使用内存和 `/var/lib/demo-assistant/conversations.json`。Redis 恢复后，新消息会重新写入 Redis；首次启用 Redis 时，有效的本地会话会自动迁移。`/reset`、“清除对话”或“重新开始”会删除当前用户的 Redis、本地文件和内存会话。
+Redis 不可用时，服务继续使用 SQLite 和 `/var/lib/wechat-agent-platform/conversations.json`。Redis 恢复后，新任务和缓存会重新写入 Redis；首次启用 Redis 时，有效的本地会话会自动迁移。`/reset`、“清除对话”或“重新开始”会删除当前用户的 Redis、本地文件和内存会话。
 
 本地 JSON 含会话内容，应保持数据目录仅服务账号可读写。
 
@@ -272,7 +272,7 @@ curl -X POST http://127.0.0.1:8080/api/audio/synthesize \
 生产环境配置文件：
 
 ```text
-/etc/demo-assistant/demo-assistant.env
+/etc/wechat-agent-platform/wechat-agent-platform.env
 ```
 
 ### 9.1 必要环境变量
@@ -304,7 +304,7 @@ curl -X POST http://127.0.0.1:8080/api/audio/synthesize \
 | `CONVERSATION_MAX_TURNS` | `20` | 完整会话轮数上限 |
 | `CONVERSATION_REDIS_ENABLED` | `true` | 是否启用 Redis |
 | `CONVERSATION_REDIS_KEY_PREFIX` | `demo-assistant:conversation:` | Redis 键前缀 |
-| `KNOWLEDGE_BASE_PATH` | `/var/lib/demo-assistant/knowledge` | 个人知识库目录 |
+| `KNOWLEDGE_BASE_PATH` | `/var/lib/wechat-agent-platform/knowledge` | 个人知识库目录 |
 | `REMINDERS_ENABLED` | `true` | 是否启用提醒 |
 | `REMINDERS_POLL_MS` | `10000` | 到期提醒扫描间隔 |
 | `ADMIN_API_TOKEN` | 空 | 管理接口令牌；配置后请求必须携带该令牌 |
@@ -322,13 +322,13 @@ curl -X POST http://127.0.0.1:8080/api/audio/synthesize \
 产物：
 
 ```text
-target/demo-0.0.1-SNAPSHOT-boot.jar
+target/wechat-agent-platform-1.0.0-boot.jar
 ```
 
 本地启动微信接入：
 
 ```powershell
-java -jar "D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar" `
+java -jar "D:\demo\target\wechat-agent-platform-1.0.0-boot.jar" `
   --assistant.ilink-enabled=true `
   --server.port=8080
 ```
@@ -358,14 +358,14 @@ java -jar "D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar" `
 ### 11.3 常用服务器命令
 
 ```bash
-systemctl status demo-assistant --no-pager
-systemctl restart demo-assistant
-journalctl -u demo-assistant -n 100 --no-pager
-journalctl -u demo-assistant -f
+systemctl status wechat-agent-platform --no-pager
+systemctl restart wechat-agent-platform
+journalctl -u wechat-agent-platform -n 100 --no-pager
+journalctl -u wechat-agent-platform -f
 redis-cli ping
 redis-cli --scan --pattern 'demo-assistant:conversation:*'
 redis-cli --scan --pattern 'demo-assistant:reminder:*'
-sha256sum /opt/demo-assistant/demo-assistant.jar
+sha256sum /opt/wechat-agent-platform/wechat-agent-platform.jar
 ```
 
 Redis 应只监听本机或可信私网，不能把 6379 端口暴露到公网。

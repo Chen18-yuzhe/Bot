@@ -22,7 +22,7 @@ echo eyJxdWVzdGlvbiI6Iuivt+iBlOe9keaQnOe0ouS7iuWkqeeahOS4u+imgeS6uuW3peaZuuiDvea
 echo eyJxdWVzdGlvbiI6Iuivt+S7juS4quS6uuefpeivhuW6k+afpeivoiBGdW5jdGlvbiBDYWxsaW5nIOW8gOWPkeinhOiMgyJ9 | base64 -d > /tmp/chat-knowledge.json
 echo eyJxdWVzdGlvbiI6Iuafpeeci+aPkOmGkuWIl+ihqCJ9 | base64 -d > /tmp/chat-reminders.json
 echo '=== 1 SERVICE ==='
-systemctl is-active demo-assistant
+systemctl is-active wechat-agent-platform
 echo '=== 2 NORMAL CHAT ==='
 curl -sS -X POST $BASE/api/chat -H Content-Type:application/json --data-binary @/tmp/chat-normal.json
 echo
@@ -52,7 +52,7 @@ echo
 echo '=== 11 ADMIN STATUS ==='
 curl -sS -w '\nHTTP=%{http_code}\n' $BASE/api/admin/status
 echo '=== 12 FUNCTION CALL LOGS ==='
-journalctl -u demo-assistant --since '15 minutes ago' --no-pager | grep -E '执行 Function Calling 工具|Function Calling 执行失败|图片编辑|图片生成|天气查询|未来天气查询|联网搜索|知识库|提醒|文档处理|语音识别|语音合成' | tail -n 160 || true
+journalctl -u wechat-agent-platform --since '15 minutes ago' --no-pager | grep -E '执行 Function Calling 工具|Function Calling 执行失败|图片编辑|图片生成|天气查询|未来天气查询|联网搜索|知识库|提醒|文档处理|语音识别|语音合成' | tail -n 160 || true
 '@
 
 Write-Host 'Running live smoke tests (password 2/2)...' -ForegroundColor Cyan

@@ -1,0 +1,47 @@
+name: wechat-agent-platform
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      QWEATHER_API_HOST: ${QWEATHER_API_HOST:-}
+      QWEATHER_API_KEY: ${QWEATHER_API_KEY:-}
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
+      TRAVEL_SUPPLIER_API_URL: ${TRAVEL_SUPPLIER_API_URL:-}
+      TRAVEL_SUPPLIER_API_KEY: ${TRAVEL_SUPPLIER_API_KEY:-}
+      TRAVEL_FLIGGY_API_URL: ${TRAVEL_FLIGGY_API_URL:-}
+      TRAVEL_FLIGGY_API_KEY: ${TRAVEL_FLIGGY_API_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+      CONVERSATION_STORAGE_FILE: /var/lib/wechat-agent-platform/conversations.json
+      AGENT_STORAGE_FILE: /var/lib/wechat-agent-platform/agent-tasks.json
+      KNOWLEDGE_BASE_PATH: /var/lib/wechat-agent-platform/knowledge
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - app-data:/var/lib/wechat-agent-platform
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  app-data:

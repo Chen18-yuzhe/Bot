@@ -26,6 +26,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,6 +35,7 @@ import jakarta.annotation.PreDestroy;
 @Service
 public class ConversationMemory {
 	private static final Logger log = LoggerFactory.getLogger(ConversationMemory.class);
+	private static final String PENDING_REPLY = "（正在生成回复…）";
 	private final Map<String, SessionMemory> sessions = new ConcurrentHashMap<>();
 	private final int maxTurns;
 	private final long ttlMillis;
@@ -45,6 +47,7 @@ public class ConversationMemory {
 	private final StringRedisTemplate redis;
 	private final boolean redisEnabled;
 	private final String redisKeyPrefix;
+	private final SqliteConversationStore sqliteStore;
 	private final AtomicBoolean redisWarningLogged = new AtomicBoolean();
 	private final AtomicBoolean saveScheduled = new AtomicBoolean();
 	private final ScheduledExecutorService persistenceExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -62,14 +65,15 @@ public class ConversationMemory {
 			@Value("${assistant.conversation.storage-file:}") String storageFile,
 			@Value("${assistant.conversation.redis-enabled:true}") boolean redisEnabled,
 			@Value("${assistant.conversation.redis-key-prefix:demo-assistant:conversation:}") String redisKeyPrefix,
-			ObjectMapper objectMapper, ObjectProvider<StringRedisTemplate> redisProvider) {
+			ObjectMapper objectMapper, ObjectProvider<StringRedisTemplate> redisProvider,
+			ObjectProvider<SqliteConversationStore> sqliteStoreProvider) {
 		this(maxTurns, ttlMinutes, maxSessions, maxMessageChars, summaryMaxChars, storageFile,
-				objectMapper, redisEnabled, redisKeyPrefix, redisProvider.getIfAvailable());
+				objectMapper, redisEnabled, redisKeyPrefix, redisProvider.getIfAvailable(), sqliteStoreProvider.getIfAvailable());
 	}
 
 	private ConversationMemory(int maxTurns, long ttlMinutes, int maxSessions, int maxMessageChars,
 			int summaryMaxChars, String storageFile, ObjectMapper objectMapper, boolean redisEnabled,
-			String redisKeyPrefix, StringRedisTemplate redis) {
+			String redisKeyPrefix, StringRedisTemplate redis, SqliteConversationStore sqliteStore) {
 		this.maxTurns = Math.max(1, maxTurns);
 		this.ttlMillis = Duration.ofMinutes(Math.max(1, ttlMinutes)).toMillis();
 		this.maxSessions = Math.max(10, maxSessions);
@@ -79,25 +83,28 @@ public class ConversationMemory {
 		this.objectMapper = objectMapper;
 		this.redis = redis;
 		this.redisEnabled = redisEnabled && redis != null;
+		this.sqliteStore = sqliteStore;
 		this.redisKeyPrefix = redisKeyPrefix == null || redisKeyPrefix.isBlank()
 				? "demo-assistant:conversation:" : redisKeyPrefix.trim();
-		load();
+		if (loadFromSqlite() == 0) load();
+		migrateRedisSessionsToSqlite();
+		migrateLocalSessionsToSqlite();
 		migrateLocalSessionsToRedis();
 	}
 
 	ConversationMemory(int maxTurns, long ttlMinutes) {
-		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", new ObjectMapper(), false, "", null);
+		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", new ObjectMapper(), false, "", null, null);
 	}
 
 	ConversationMemory(int maxTurns, long ttlMinutes, int maxSessions, int maxMessageChars,
 			int summaryMaxChars, String storageFile, ObjectMapper objectMapper) {
 		this(maxTurns, ttlMinutes, maxSessions, maxMessageChars, summaryMaxChars, storageFile,
-				objectMapper, false, "", null);
+				objectMapper, false, "", null, null);
 	}
 
 	ConversationMemory(int maxTurns, long ttlMinutes, ObjectMapper objectMapper,
 			StringRedisTemplate redis, String redisKeyPrefix) {
-		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", objectMapper, true, redisKeyPrefix, redis);
+		this(maxTurns, ttlMinutes, 1000, 4000, 6000, "", objectMapper, true, redisKeyPrefix, redis, null);
 	}
 
 	public List<ConversationTurn> history(String sessionId) {
@@ -132,7 +139,7 @@ public class ConversationMemory {
 			if (!memory.summary.isBlank()) {
 				result.add(new ConversationTurn("Earlier conversation summary", memory.summary));
 			}
-			result.addAll(memory.turns);
+			memory.turns.stream().filter(turn -> !PENDING_REPLY.equals(turn.assistantMessage())).forEach(result::add);
 			return result;
 		}
 	}
@@ -147,8 +154,17 @@ public class ConversationMemory {
 			memory = existing == null ? candidate : existing;
 		}
 		synchronized (memory) {
-			if (expired(memory)) memory.turns.clear();
-			memory.turns.addLast(new ConversationTurn(limit(question), limit(answer)));
+			if (expired(memory)) {
+				memory.turns.clear();
+				memory.summary = "";
+			}
+			String storedQuestion = limit(question);
+			ConversationTurn latest = memory.turns.peekLast();
+			if (latest != null && PENDING_REPLY.equals(latest.assistantMessage())
+					&& storedQuestion.equals(latest.userMessage())) {
+				memory.turns.removeLast();
+			}
+			memory.turns.addLast(new ConversationTurn(storedQuestion, limit(answer)));
 			while (memory.turns.size() > maxTurns) {
 				ConversationTurn old = memory.turns.removeFirst();
 				appendSummary(memory, old);
@@ -156,15 +172,80 @@ public class ConversationMemory {
 			memory.lastAccessAt = System.currentTimeMillis();
 		}
 		prune();
+		writeSqlite(sessionId, memory);
 		writeRedis(sessionId, memory);
 		scheduleSave();
+	}
+
+	/** Stores an inbound message before model work starts so the admin console can show it immediately. */
+	public void rememberIncoming(String sessionId, String question) {
+		if (sessionId == null || sessionId.isBlank() || question == null) return;
+		SessionMemory memory = sessions.get(sessionId);
+		if (memory == null) {
+			RedisRead redisRead = readRedis(sessionId);
+			SessionMemory candidate = redisRead.memory() == null ? new SessionMemory() : redisRead.memory();
+			SessionMemory existing = sessions.putIfAbsent(sessionId, candidate);
+			memory = existing == null ? candidate : existing;
+		}
+		synchronized (memory) {
+			if (expired(memory)) {
+				memory.turns.clear();
+				memory.summary = "";
+			}
+			memory.turns.addLast(new ConversationTurn(limit(question), PENDING_REPLY));
+			while (memory.turns.size() > maxTurns) {
+				ConversationTurn old = memory.turns.removeFirst();
+				appendSummary(memory, old);
+			}
+			memory.lastAccessAt = System.currentTimeMillis();
+		}
+		prune();
+		writeSqlite(sessionId, memory);
+		writeRedis(sessionId, memory);
+		scheduleSave();
+	}
+
+	/** Returns the cutoff used by the private console to hide expired records before scheduled cleanup runs. */
+	public long retentionCutoffMillis() {
+		return System.currentTimeMillis() - ttlMillis;
+	}
+
+	/** Deletes expired SQLite rows even when no new messages arrive. Redis entries use the same sliding TTL. */
+	@Scheduled(fixedDelayString = "${assistant.conversation.cleanup-interval-ms:3600000}")
+	public void purgeExpiredConversations() {
+		long cutoff = retentionCutoffMillis();
+		int sqliteDeleted = sqliteStore == null ? 0 : sqliteStore.deleteExpired(cutoff);
+		int before = sessions.size();
+		sessions.entrySet().removeIf(entry -> entry.getValue().lastAccessAt < cutoff);
+		int localDeleted = before - sessions.size();
+		if (sqliteDeleted > 0 || localDeleted > 0) {
+			log.info("已清理过期会话：SQLite={}，内存={}", sqliteDeleted, localDeleted);
+			scheduleSave();
+		}
 	}
 
 	public void clear(String sessionId) {
 		if (sessionId == null || sessionId.isBlank()) return;
 		sessions.remove(sessionId);
+		if (sqliteStore != null) sqliteStore.delete(sessionId);
 		deleteRedis(sessionId);
 		scheduleSave();
+	}
+
+	/** Updates the stored rolling summary without changing the retained raw turns. */
+	public boolean updateSummary(String sessionId, String summary) {
+		if (sqliteStore == null || !sqliteStore.isAvailable() || sessionId == null || sessionId.isBlank()) return false;
+		String value = summary == null ? "" : limit(summary);
+		if (!sqliteStore.updateSummary(sessionId, value)) return false;
+		SessionMemory memory = sessions.get(sessionId);
+		if (memory != null) {
+			synchronized (memory) {
+				memory.summary = value;
+			}
+			writeRedis(sessionId, memory);
+		}
+		scheduleSave();
+		return true;
 	}
 
 	/** Removes every persisted conversation whose session id belongs to an account namespace. */
@@ -190,8 +271,35 @@ public class ConversationMemory {
 				warnRedis("枚举待删除会话", error);
 			}
 		}
+		int sqliteDeleted = sqliteStore == null ? 0 : sqliteStore.deleteBySessionPrefix(sessionPrefix);
 		sessionIds.forEach(this::clear);
-		return sessionIds.size();
+		return Math.max(sqliteDeleted, sessionIds.size());
+	}
+
+	/** Removes all in-memory, Redis and SQLite conversations for one bot account. */
+	public int clearByAccount(String accountId) {
+		if (accountId == null || accountId.isBlank()) return 0;
+		Set<String> sessionIds = new LinkedHashSet<>();
+		sessions.keySet().stream().filter(id -> belongsToAccount(id, accountId)).forEach(sessionIds::add);
+		if (redisEnabled) {
+			try {
+				Set<String> keys = redis.keys(redisKeyPrefix + "*");
+				if (keys != null) for (String key : keys) {
+					String json = redis.opsForValue().get(key);
+					if (json == null) continue;
+					StoredSession stored = objectMapper.readValue(json, StoredSession.class);
+					if (stored.sessionId() != null && belongsToAccount(stored.sessionId(), accountId)) {
+						sessionIds.add(stored.sessionId());
+					}
+				}
+				redisWarningLogged.set(false);
+			} catch (Exception error) {
+				warnRedis("枚举账户会话", error);
+			}
+		}
+		int sqliteDeleted = sqliteStore == null ? 0 : sqliteStore.deleteByAccount(accountId);
+		sessionIds.forEach(this::clear);
+		return Math.max(sqliteDeleted, sessionIds.size());
 	}
 
 	public int activeSessionCount() {
@@ -303,6 +411,7 @@ public class ConversationMemory {
 	private void prune() {
 		long now = System.currentTimeMillis();
 		sessions.entrySet().removeIf(entry -> now - entry.getValue().lastAccessAt > ttlMillis);
+		if (sqliteStore != null) sqliteStore.deleteExpired(now - ttlMillis);
 		int excess = sessions.size() - maxSessions;
 		if (excess <= 0) return;
 		sessions.entrySet().stream().sorted(Comparator.comparingLong(e -> e.getValue().lastAccessAt))
@@ -311,6 +420,10 @@ public class ConversationMemory {
 
 	private boolean expired(SessionMemory memory) {
 		return System.currentTimeMillis() - memory.lastAccessAt > ttlMillis;
+	}
+
+	private static boolean belongsToAccount(String sessionId, String accountId) {
+		return "default".equals(accountId) ? !sessionId.contains("::") : sessionId.startsWith(accountId + "::");
 	}
 
 	private void scheduleSave() {
@@ -337,6 +450,58 @@ public class ConversationMemory {
 			log.info("已恢复 {} 个持久化对话会话", sessions.size());
 		} catch (Exception error) {
 			log.warn("读取对话存储失败，将使用空会话：{}", error.getMessage());
+		}
+	}
+
+	private int loadFromSqlite() {
+		if (sqliteStore == null || !sqliteStore.isAvailable()) return 0;
+		int restored = 0;
+		for (SqliteConversationStore.PersistedConversation stored : sqliteStore.loadActive(
+				System.currentTimeMillis() - ttlMillis, maxTurns)) {
+			SessionMemory memory = new SessionMemory();
+			memory.summary = stored.summary() == null ? "" : stored.summary();
+			stored.turns().forEach(memory.turns::addLast);
+			memory.lastAccessAt = stored.lastAccessAt();
+			sessions.put(stored.sessionId(), memory);
+			restored++;
+		}
+		if (restored > 0) log.info("已从 SQLite 恢复 {} 个持久化对话会话", restored);
+		return restored;
+	}
+
+	private void migrateLocalSessionsToSqlite() {
+		if (sqliteStore == null || !sqliteStore.isAvailable() || sessions.isEmpty()) return;
+		for (Map.Entry<String, SessionMemory> entry : sessions.entrySet()) {
+			writeSqlite(entry.getKey(), entry.getValue());
+		}
+	}
+
+	private void migrateRedisSessionsToSqlite() {
+		if (!redisEnabled || sqliteStore == null || !sqliteStore.isAvailable()) return;
+		int migrated = 0;
+		try {
+			Set<String> keys = redis.keys(redisKeyPrefix + "*");
+			if (keys == null) return;
+			for (String key : keys) {
+				String json = redis.opsForValue().get(key);
+				if (json == null) continue;
+				StoredSession stored = objectMapper.readValue(json, StoredSession.class);
+				if (stored.sessionId() == null || stored.sessionId().isBlank()) continue;
+				sqliteStore.upsert(stored.sessionId(), stored.summary(),
+						stored.turns() == null ? List.of() : stored.turns(), stored.lastAccessAt());
+				migrated++;
+			}
+			redisWarningLogged.set(false);
+		} catch (Exception error) {
+			warnRedis("迁移到 SQLite", error);
+		}
+		if (migrated > 0) log.info("已将 {} 个 Redis 对话会话迁移到 SQLite", migrated);
+	}
+
+	private void writeSqlite(String sessionId, SessionMemory memory) {
+		if (sqliteStore == null || !sqliteStore.isAvailable()) return;
+		synchronized (memory) {
+			sqliteStore.upsert(sessionId, memory.summary, new ArrayList<>(memory.turns), memory.lastAccessAt);
 		}
 	}
 

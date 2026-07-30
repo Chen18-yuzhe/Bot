@@ -7,7 +7,18 @@
 	<appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
 		<encoder>
 			<!-- [requestId] 贯穿 HTTP 与 iLink 消息处理全链路。 -->
-			<pattern>%d{HH:mm:ss} %-5level [%X{requestId:-}] %logger{30} - %maskedMsg%n</pattern>
+			<pattern>%d{HH:mm:ss} %-5level [request=%X{requestId:-} bot=%X{botAccount:-}] %logger{30} - %maskedMsg%n</pattern>
+			<charset>UTF-8</charset>
+		</encoder>
+	</appender>
+
+	<springProperty name="applicationLogFile" source="assistant.logs.file"
+			defaultValue="/var/lib/wechat-agent-platform/logs/application.log"/>
+	<appender name="APPLICATION_FILE" class="ch.qos.logback.core.FileAppender">
+		<file>${applicationLogFile}</file>
+		<append>true</append>
+		<encoder>
+			<pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [request=%X{requestId:-} bot=%X{botAccount:-}] %logger{30} - %maskedMsg%n</pattern>
 			<charset>UTF-8</charset>
 		</encoder>
 	</appender>
@@ -15,5 +26,6 @@
 	<!-- 日志级别仍由 application.properties 的 logging.level.* 控制。 -->
 	<root level="WARN">
 		<appender-ref ref="CONSOLE"/>
+		<appender-ref ref="APPLICATION_FILE"/>
 	</root>
 </configuration>

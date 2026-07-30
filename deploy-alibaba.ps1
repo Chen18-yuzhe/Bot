@@ -2,8 +2,8 @@ $ErrorActionPreference = 'Stop'
 
 $Server = 'root@101.200.53.44'
 $ProjectRoot = 'D:\demo'
-$Jar = Join-Path $ProjectRoot 'target\demo-0.0.1-SNAPSHOT-boot.jar'
-$Installer = Join-Path $ProjectRoot 'deploy\install-demo-assistant.sh'
+$Jar = Join-Path $ProjectRoot 'target\wechat-agent-platform-1.0.0-boot.jar'
+$Installer = Join-Path $ProjectRoot 'deploy\install-wechat-agent-platform.sh'
 
 function Stop-WithMessage([string] $Message) {
     Write-Host "`n$Message" -ForegroundColor Red
@@ -29,7 +29,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "`nUpload complete. Enter the root password again, then provide the application settings." -ForegroundColor Green
-$RemoteCommand = 'sed -i ''s/\r$//'' /tmp/install-demo-assistant.sh && chmod 700 /tmp/install-demo-assistant.sh && /tmp/install-demo-assistant.sh'
+$RemoteCommand = 'sed -i ''s/\r$//'' /tmp/install-wechat-agent-platform.sh && chmod 700 /tmp/install-wechat-agent-platform.sh && /tmp/install-wechat-agent-platform.sh'
 & ssh -t $Server $RemoteCommand
 if ($LASTEXITCODE -ne 0) {
     Stop-WithMessage 'Remote installation did not complete. Keep the error text shown above.'

@@ -12,6 +12,11 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.example.demo.skills.Skill;
+import com.example.demo.skills.SkillContext;
+import com.example.demo.skills.SkillContribution;
+import com.example.demo.skills.SkillManager;
+
 class AssistantServiceTests {
 
 	private final FunctionCallingService functionCallingService = mock(FunctionCallingService.class);
@@ -19,6 +24,26 @@ class AssistantServiceTests {
 	private final AssistantService assistantService = new AssistantService(
 			functionCallingService, new ConversationMemory(8, 30),
 			visualUnderstandingService);
+
+	@Test
+	void shouldEnrichMessageBeforeCallingTheReplyModel() {
+		String question = "use my private notes";
+		Skill contextSkill = new Skill() {
+			@Override public String id() { return "test-context"; }
+			@Override public SkillContribution apply(SkillContext context) {
+				return new SkillContribution(id(), "context-from-skill");
+			}
+		};
+		AssistantService service = new AssistantService(functionCallingService,
+				new ConversationMemory(8, 30), visualUnderstandingService,
+				new SkillManager(List.of(contextSkill)));
+		when(functionCallingService.reply(eq("rag-session"), eq(question), eq(List.of()),
+				contains("context-from-skill"))).thenReturn(AssistantReply.text("answer"));
+
+		AssistantReply reply = service.reply("rag-session", question);
+
+		assertEquals("answer", reply.text());
+	}
 
 	@Test
 	void shouldRouteExplicitImageRequestToWanModel() {
@@ -57,6 +82,31 @@ class AssistantServiceTests {
 		AssistantReply reply = assistantService.replyToMedia("new-session", question, media);
 
 		assertEquals(generated, reply.image());
+	}
+
+	@Test
+	void shouldUseRecentTripContextWhenReadingATicketSelectionScreenshot() {
+		String sessionId = "travel-screenshot-session";
+		String tripQuestion = "我选第二个杭州方案，灵隐寺只买基础门票，不要套票";
+		String tripAnswer = "好的，后续按轻松深度方案选择基础门票。";
+		when(functionCallingService.reply(sessionId, tripQuestion, List.of()))
+				.thenReturn(AssistantReply.text(tripAnswer));
+		assistantService.reply(sessionId, tripQuestion);
+
+		List<MediaContent> media = List.of(new MediaContent(MediaContent.MediaType.IMAGE,
+				new byte[] { 7, 8, 9 }, "image/jpeg"));
+		String screenshotQuestion = "按刚才的方案我应该点哪个？";
+		when(visualUnderstandingService.analyze(media, screenshotQuestion))
+				.thenReturn("页面可见“成人基础票”和“门票+演出套票”两个选项。");
+		when(functionCallingService.reply(eq(sessionId), eq(screenshotQuestion),
+				eq(List.of(new ConversationTurn(tripQuestion, tripAnswer))),
+				contains("不得声称已经代用户点击"), eq(media)))
+				.thenReturn(AssistantReply.text("选择“成人基础票”，排除“门票+演出套票”。"));
+
+		AssistantReply reply = assistantService.replyToMedia(
+				sessionId, screenshotQuestion, media);
+
+		assertEquals("选择“成人基础票”，排除“门票+演出套票”。", reply.text());
 	}
 
 	@Test

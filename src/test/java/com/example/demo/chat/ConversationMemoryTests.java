@@ -11,6 +11,7 @@ import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
+import java.util.List;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -41,6 +42,20 @@ class ConversationMemoryTests {
 		memory.clear("user-a");
 
 		assertTrue(memory.history("user-a").isEmpty());
+	}
+
+	@Test
+	void shouldExposeIncomingMessageImmediatelyAndReplacePendingReply() {
+		ConversationMemory memory = new ConversationMemory(8, 30);
+
+		memory.rememberIncoming("user-a", "最新问题");
+		assertEquals(List.of(), memory.history("user-a"));
+
+		memory.remember("user-a", "最新问题", "最新回答");
+		List<ConversationTurn> turns = memory.history("user-a");
+		assertEquals(1, turns.size());
+		assertEquals("最新问题", turns.getFirst().userMessage());
+		assertEquals("最新回答", turns.getFirst().assistantMessage());
 	}
 
 	@Test

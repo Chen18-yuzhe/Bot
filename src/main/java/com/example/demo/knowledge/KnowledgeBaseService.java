@@ -28,7 +28,7 @@ public class KnowledgeBaseService {
 	private static final Pattern LATIN_WORD = Pattern.compile("[a-z0-9_\\-]{2,}");
 	private final Path root;
 
-	public KnowledgeBaseService(@Value("${assistant.knowledge-base.path:/var/lib/demo-assistant/knowledge}") String path) {
+	public KnowledgeBaseService(@Value("${assistant.knowledge-base.path:/var/lib/wechat-agent-platform/knowledge}") String path) {
 		this.root = Path.of(path).toAbsolutePath().normalize();
 	}
 

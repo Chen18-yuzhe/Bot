@@ -23,7 +23,8 @@ public class WebSearchTool implements AssistantTool {
 		String query = arguments.path("query").asText("").trim();
 		if (query.isBlank()) throw new IllegalArgumentException("缺少必填参数：query");
 		String result = service.search(query);
-		return result.startsWith("联网搜索没有返回有效结果")
+		return result.startsWith(WebSearchService.NO_VERIFIED_SOURCES)
+				|| result.startsWith("联网搜索没有返回有效结果")
 				? ToolResult.noResult(result) : ToolResult.text(result);
 	}
 }

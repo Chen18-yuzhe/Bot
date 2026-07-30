@@ -1,0 +1,26 @@
+request,expected_type
+做一份杭州三日旅游攻略,travel
+帮我安排北京五日自由行,travel
+查询故宫门票购票入口,travel
+周末去苏州玩怎么安排,travel
+比较上海到成都的交通路线,travel
+深度调研国内 AI 编程助手,research
+输出新能源汽车行业报告,research
+做一份 Spring AI 竞品分析,research
+低代码平台市场分析并给证据,research
+评估向量数据库项目可行性分析,research
+制定六周 Java 学习计划,learning
+给我一份考研复习计划,learning
+设计 Spring Boot 学习路线,learning
+带我学习 Redis 并安排测验,learning
+制定英语口语训练计划,learning
+帮我做 PostgreSQL 和 MySQL 技术选型,decision
+比较 Kafka 和 RocketMQ 应该选哪个,decision
+做一份云服务器采购对比,decision
+帮我做前端技术选型,decision
+使用决策矩阵比较三个候选方案,decision
+计算一元二次方程,generic
+提醒我明天开会,generic
+解释什么是依赖注入,generic
+把这段话翻译成英文,generic
+查询当前北京时间,generic

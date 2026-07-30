@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $Server = 'root@101.200.53.44'
-$Jar = 'D:\demo\target\demo-0.0.1-SNAPSHOT-boot.jar'
+$Jar = 'D:\demo\target\wechat-agent-platform-1.0.0-boot.jar'
 if (-not (Test-Path -LiteralPath $Jar)) {
     throw "JAR not found: $Jar"
 }
@@ -10,14 +10,14 @@ $RemoteCommand = @'
 set -eu
 EXPECTED_SHA256=__EXPECTED_SHA256__
 echo '=== SERVICE ==='
-systemctl is-active demo-assistant
+systemctl is-active wechat-agent-platform
 echo '=== INSTALLED JAR ==='
-sha256sum /opt/demo-assistant/demo-assistant.jar
-printf '%s  %s\n' "$EXPECTED_SHA256" /opt/demo-assistant/demo-assistant.jar | sha256sum -c -
+sha256sum /opt/wechat-agent-platform/wechat-agent-platform.jar
+printf '%s  %s\n' "$EXPECTED_SHA256" /opt/wechat-agent-platform/wechat-agent-platform.jar | sha256sum -c -
 echo '=== ADMIN STATUS ==='
 curl -sS -w '\nHTTP=%{http_code}\n' http://127.0.0.1:8080/api/admin/status
 echo '=== RECENT ERRORS ==='
-journalctl -u demo-assistant -n 100 --no-pager
+journalctl -u wechat-agent-platform -n 100 --no-pager
 '@.Replace('__EXPECTED_SHA256__', $ExpectedHash)
 
 Write-Host "Expected SHA256: $ExpectedHash" -ForegroundColor Cyan
