@@ -4,7 +4,7 @@
 
 ## 数据结构
 
-- 键前缀：`demo-assistant:conversation:`
+- 键前缀：`bot:conversation:`
 - 键后缀：微信用户 ID 的 SHA-256，不在 Redis 键名中保存原始用户 ID
 - 值：有界的 JSON 会话对象，包含摘要、最近轮次和最后访问时间
 - TTL：默认 `1440` 分钟
@@ -17,7 +17,7 @@
 REDIS_URL=redis://127.0.0.1:6379/0
 CONVERSATION_REDIS_ENABLED=true
 CONVERSATION_TTL_MINUTES=1440
-CONVERSATION_REDIS_KEY_PREFIX=demo-assistant:conversation:
+CONVERSATION_REDIS_KEY_PREFIX=bot:conversation:
 ```
 
 生产环境应让 Redis 仅监听本机或私网，不要将 6379 端口暴露到公网。若使用远端 Redis，应启用账号密码和 TLS，并把凭据放入服务器环境文件，不要提交到仓库。

@@ -36,6 +36,7 @@ HELP.md
 *.env
 application-local.properties
 .demo-ilink/
+.bot-ilink/
 credentials.json
 
 # IDE files

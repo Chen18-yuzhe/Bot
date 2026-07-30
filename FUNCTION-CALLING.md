@@ -14,7 +14,7 @@
 
 ## 新增工具
 
-1. 在 `com.example.demo.tools` 中新增实现 `AssistantTool` 的 Spring Bean。
+1. 在 `com.example.bot.tools` 中新增实现 `AssistantTool` 的 Spring Bean。
 2. 使用 `FunctionDefinition.builder()` 定义唯一、稳定的英文工具名。
 3. 参数必须使用严格 JSON Schema，列出 `required` 并设置 `additionalProperties: false`。
 4. 在 `execute(JsonNode, ToolContext)` 中再次校验全部参数；不能只信任模型生成的 JSON。

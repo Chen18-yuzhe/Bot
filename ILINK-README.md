@@ -37,7 +37,7 @@ java -jar "D:\demo\target\wechat-agent-platform-1.0.0-boot.jar" `
 原自写客户端保存的登录凭据会自动迁移到 SDK 格式。会话文件默认位于：
 
 ```text
-%USERPROFILE%\.demo-ilink\credentials.json
+%USERPROFILE%\.bot-ilink\credentials.json
 ```
 
 该文件包含登录令牌，不要上传到 GitHub、发给别人或放进项目目录。令牌失效时，先停止程序，删除该文件，再启动程序重新扫码。

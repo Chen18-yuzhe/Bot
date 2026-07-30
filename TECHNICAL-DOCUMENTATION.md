@@ -162,7 +162,7 @@ flowchart LR
 
 ### 5.3 新增工具规范
 
-1. 在 `com.example.demo.tools` 下新建类，实现 `AssistantTool` 并标注 `@Component`。
+1. 在 `com.example.bot.tools` 下新建类，实现 `AssistantTool` 并标注 `@Component`。
 2. 使用稳定且唯一的英文工具名。
 3. 使用 `FunctionDefinition.builder()` 声明用途和 JSON Schema。
 4. Schema 必须声明 `required`，并设置 `additionalProperties: false`。
@@ -199,7 +199,7 @@ Spring 会自动注册该工具，不需要修改中央 `switch`。新功能默�
 ### 6.1 Redis 数据模型
 
 - 每个用户一个 Redis 字符串键。
-- 键名为 `demo-assistant:conversation:` 加用户 ID 的 SHA-256，避免在键名暴露微信 ID。
+- 键名为 `bot:conversation:` 加用户 ID 的 SHA-256，避免在键名暴露微信 ID。
 - 值为 JSON，包含最近对话、旧对话摘要和最后访问时间。
 - 默认保留最近 20 个完整轮次；更早内容压缩到最多 6000 字的摘要。
 - 单条消息最多保存 4000 字。
@@ -303,7 +303,7 @@ curl -X POST http://127.0.0.1:8080/api/audio/synthesize \
 | `CONVERSATION_TTL_MINUTES` | `1440` | 会话滑动过期时间 |
 | `CONVERSATION_MAX_TURNS` | `20` | 完整会话轮数上限 |
 | `CONVERSATION_REDIS_ENABLED` | `true` | 是否启用 Redis |
-| `CONVERSATION_REDIS_KEY_PREFIX` | `demo-assistant:conversation:` | Redis 键前缀 |
+| `CONVERSATION_REDIS_KEY_PREFIX` | `bot:conversation:` | Redis 键前缀 |
 | `KNOWLEDGE_BASE_PATH` | `/var/lib/wechat-agent-platform/knowledge` | 个人知识库目录 |
 | `REMINDERS_ENABLED` | `true` | 是否启用提醒 |
 | `REMINDERS_POLL_MS` | `10000` | 到期提醒扫描间隔 |
@@ -333,7 +333,7 @@ java -jar "D:\demo\target\wechat-agent-platform-1.0.0-boot.jar" `
   --server.port=8080
 ```
 
-首次启动需要扫码；登录凭据默认保存在 `${user.home}/.demo-ilink/credentials.json`。该文件包含令牌，禁止提交或分享。
+首次启动需要扫码；登录凭据默认保存在 `${user.home}/.bot-ilink/credentials.json`。该文件包含令牌，禁止提交或分享。
 
 ## 11. 服务器部署与运维
 

@@ -9,7 +9,7 @@
 ## 核心亮点
 
 - **可恢复 Agent Runtime**：每个推理边界保存断点，支持暂停、恢复、取消、重试、超时、Token/步骤预算和 Human-in-the-loop。
-- **插件式扩展**：Agent 类型、Function Calling 工具和 Skill 均通过 Spring Bean 自动注册。
+- **插件式扩展**：Agent 类型、Function Calling 工具和 Skill 均通过 Spring Bean 自动注册；已接入 Bilibili 收藏夹本地 SDK。
 - **多模态微信助手**：支持文本、图片、音频、视频和 Office/PDF 文档处理。
 - **账号隔离 RAG 与记忆**：SQLite 保存会话，Redis 提供任务索引与调度，本地文件负责故障降级。
 - **可观测与安全**：私有管理台展示 Agent Trace、工具指标、P95/P99、用量和审计；包含限流、熔断、模型降级及日志脱敏。
@@ -28,7 +28,7 @@ flowchart LR
     L --> P["Redis + JSON 断点"]
     A --> M["SQLite 会话记忆"]
     F --> T
-    T --> X["搜索 / 天气 / 多模态 / 旅游适配器"]
+    T --> X["搜索 / 天气 / 多模态 / 旅游 / B站收藏夹"]
     O["私有管理台"] --> L
     O --> M
 ```
@@ -90,10 +90,42 @@ docker compose up --build
 | `QWEATHER_API_HOST` / `QWEATHER_API_KEY` | 实时天气 | 天气功能必需 |
 | `REDIS_URL` | Agent 调度、提醒与缓存 | 否，可降级 |
 | `ADMIN_API_TOKEN` | 私有管理台认证 | 生产建议设置 |
+| `BILI_COOKIE` | Bilibili 登录 Cookie，只从环境读取 | 否，也可扫码登录 |
+| `BILI_ALLOWED_SESSION_IDS` | 可访问私人收藏夹的完整会话 ID，逗号分隔 | 启用 B 站工具时必需 |
 | `ILINK_CREDENTIALS_FILE` | 微信 iLink 会话文件 | 微信接入必需 |
 | `TRAVEL_SUPPLIER_API_URL` / `TRAVEL_SUPPLIER_API_KEY` | 真实票务供应商结算适配 | 真实票务必需 |
 
 完整配置参见 [项目详细介绍](PROJECT-INTRODUCTION.md) 与 [技术文档](TECHNICAL-DOCUMENTATION.md)。
+
+## Bilibili 收藏夹
+
+项目已接入本地 SDK `com.bili.fav:java-fav:1.0.0`，并注册
+`manage_bilibili_favorites` 工具和 `bilibili-favorites` Skill。支持：
+
+- 获取收藏夹、同步视频元数据和字幕；
+- 按标题、UP 主、简介或字幕检索本地视频；
+- 将某个收藏夹的字幕幂等写入账号隔离知识库；
+- 聊天命中收藏内容时提示“您的收藏夹中有对应的视频讲解”。
+
+最简单的登录方式是在服务器环境中设置 `BILI_COOKIE`。Cookie 不应写进
+`application.properties`、`.env.example` 或 Git。必须同时设置精确会话白名单，例如：
+
+```dotenv
+BILI_COOKIE=SESSDATA=...; bili_jct=...; DedeUserID=...
+BILI_ALLOWED_SESSION_IDS=account-id::user-id
+```
+
+也可以使用管理接口扫码登录，Cookie 只保存在当前 Java 进程内存中，重启后失效：
+
+```powershell
+$headers = @{ "X-Admin-Token" = $env:ADMIN_API_TOKEN }
+Invoke-RestMethod -Method Post -Headers $headers http://127.0.0.1:8080/api/admin/bilibili/login
+Invoke-WebRequest -Headers $headers http://127.0.0.1:8080/api/admin/bilibili/qrcode.svg -OutFile bili-login.svg
+Invoke-RestMethod -Headers $headers http://127.0.0.1:8080/api/admin/bilibili/status
+```
+
+上述管理接口仍受“仅本机/SSH 隧道访问”和 `ADMIN_API_TOKEN` 双重保护。
+SDK 制品来源与重建方式见 [vendor 说明](vendor/README.md)。
 
 ## 能力边界
 

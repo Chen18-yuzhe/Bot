@@ -2,7 +2,7 @@
 <configuration>
 	<!-- %maskedMsg：所有日志先经过脱敏（API Key、Bearer 令牌、手机号）。 -->
 	<conversionRule conversionWord="maskedMsg"
-			class="com.example.demo.logging.SensitiveDataConverter"/>
+			class="com.example.bot.logging.SensitiveDataConverter"/>
 
 	<appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
 		<encoder>

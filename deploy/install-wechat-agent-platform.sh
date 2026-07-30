@@ -150,7 +150,7 @@ if ! id "${APP_USER}" >/dev/null 2>&1; then
 fi
 
 install -d -o root -g root -m 0755 "${APP_DIR}"
-install -d -o "${APP_USER}" -g "${APP_USER}" -m 0700 "${DATA_DIR}" "${DATA_DIR}/.demo-ilink" "${DATA_DIR}/knowledge" "${DATA_DIR}/logs"
+install -d -o "${APP_USER}" -g "${APP_USER}" -m 0700 "${DATA_DIR}" "${DATA_DIR}/.bot-ilink" "${DATA_DIR}/knowledge" "${DATA_DIR}/logs"
 install -d -o root -g "${APP_USER}" -m 0750 "${ENV_DIR}"
 install -o root -g root -m 0644 "${SOURCE_JAR}" "${APP_DIR}/${APP_NAME}.jar"
 
@@ -199,7 +199,10 @@ if [[ ! -s "${ENV_FILE}" ]]; then
     printf 'QWEATHER_API_HOST=%s\n' "${QWEATHER_API_HOST}"
     printf 'QWEATHER_API_KEY=%s\n' "${QWEATHER_API_KEY}"
     printf 'ADMIN_API_TOKEN=%s\n' "${ADMIN_API_TOKEN}"
-    printf 'ILINK_CREDENTIALS_FILE=%s\n' "${DATA_DIR}/.demo-ilink/credentials.json"
+    printf 'ILINK_CREDENTIALS_FILE=%s\n' "${DATA_DIR}/.bot-ilink/credentials.json"
+    printf 'BILI_COOKIE=\n'
+    printf 'BILI_ALLOWED_SESSION_IDS=\n'
+    printf 'BILI_LOGIN_TIMEOUT_SECONDS=180\n'
     printf 'REDIS_URL=redis://127.0.0.1:6379/0\n'
     printf 'CONVERSATION_REDIS_ENABLED=true\n'
     printf 'CONVERSATION_TTL_MINUTES=1440\n'
@@ -218,6 +221,19 @@ if [[ ! -s "${ENV_FILE}" ]]; then
     printf 'AUDIT_ENABLED=false\n'
   } > "${ENV_FILE}"
 fi
+
+# Existing installations keep their secrets and receive only safe defaults for
+# newly introduced settings.
+ensure_env_default() {
+  local key="$1" value="$2"
+  if ! grep -q "^${key}=" "${ENV_FILE}"; then
+    printf '%s=%s\n' "${key}" "${value}" >> "${ENV_FILE}"
+  fi
+}
+ensure_env_default "BILI_COOKIE" ""
+ensure_env_default "BILI_ALLOWED_SESSION_IDS" ""
+ensure_env_default "BILI_LOGIN_TIMEOUT_SECONDS" "180"
+
 chown root:"${APP_USER}" "${ENV_FILE}"
 chmod 0640 "${ENV_FILE}"
 unset DASHSCOPE_API_KEY DASHSCOPE_BASE_URL QWEATHER_API_HOST QWEATHER_API_KEY ADMIN_API_TOKEN 2>/dev/null || true
@@ -232,7 +248,7 @@ After=network-online.target
 Type=simple
 User=${APP_USER}
 Group=${APP_USER}
-WorkingDirectory=${APP_DIR}
+WorkingDirectory=${DATA_DIR}
 EnvironmentFile=${ENV_FILE}
 ExecStart=${JAVA_BIN} -jar ${APP_DIR}/${APP_NAME}.jar --assistant.ilink-enabled=true --server.address=127.0.0.1 --server.port=8080
 Restart=on-failure
