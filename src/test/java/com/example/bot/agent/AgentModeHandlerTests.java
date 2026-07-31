@@ -26,7 +26,7 @@ class AgentModeHandlerTests {
 		assertTrue(handler.handle("wx-user", "/agent-mode").contains("Agent 模式"));
 		String reply = handler.handle("wx-user", "帮我比较三家酒店");
 
-		assertTrue(reply.contains("正在处理"));
+		assertEquals("⌁ 正在分析目标…", reply);
 		assertTrue(!reply.contains("#12345678"));
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), eq("帮我比较三家酒店"), any());
 	}
@@ -43,7 +43,7 @@ class AgentModeHandlerTests {
 		assertTrue(handler.handle("wx-user", "/agent").contains("Agent 模式"));
 		String reply = handler.handle("wx-user", "8月10日去杭州玩2天，2个人，预算2000元，给我几种方案");
 
-		assertTrue(reply.contains("正在处理"));
+		assertEquals("⌁ 正在分析目标…", reply);
 		assertTrue(!reply.contains("任务 #"));
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), any(), any());
 	}
@@ -58,7 +58,7 @@ class AgentModeHandlerTests {
 
 		String reply = handler.handle("wx-user", "/agent\n8月10日从上海去杭州玩2天，2个人，预算2000元，给我三种方案");
 
-		assertTrue(reply.contains("正在处理"));
+		assertEquals("⌁ 正在分析目标…", reply);
 		assertEquals(AgentModeHandler.Mode.AGENT, handler.modeOf("wx-user"));
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), any(), any());
 	}
@@ -84,9 +84,24 @@ class AgentModeHandlerTests {
 
 		String reply = handler.handle("wx-user", "帮我找灵隐飞来峰门票 H5 链接");
 
-		assertTrue(reply.contains("正在处理"));
+		assertEquals("⌁ 正在分析目标…", reply);
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME),
 				eq("帮我找灵隐飞来峰门票 H5 链接"), any());
+	}
+
+	@Test
+	void newStandaloneChatQuestionCancelsThePreviousActiveAgentTask() {
+		AgentLoopService loop = mock(AgentLoopService.class);
+		AgentTask active = new AgentTask();
+		active.setId("old-active-task");
+		active.setSessionId("wx-user");
+		active.setStatus(AgentTaskStatus.RUNNING);
+		when(loop.list("wx-user")).thenReturn(java.util.List.of(active));
+		AgentModeHandler handler = new AgentModeHandler(loop);
+
+		assertNull(handler.handle("wx-user", "会话定位0731"));
+
+		verify(loop).cancel("old-active-task");
 	}
 
 	@Test

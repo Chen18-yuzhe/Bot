@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import com.example.bot.chat.ConversationMemory;
+import com.example.bot.chat.ConversationContextPolicy;
 import com.example.bot.chat.ConversationTurn;
 
 import jakarta.annotation.PreDestroy;
@@ -27,6 +28,8 @@ public class AgentModeHandler {
 	private final AgentTaskRouter taskRouter;
 	private final Map<String, Mode> modes = new ConcurrentHashMap<>();
 	private final Map<String, String> originalGoals = new ConcurrentHashMap<>();
+	private final Map<String, Long> sessionVersions = new ConcurrentHashMap<>();
+	private final Map<String, Long> taskVersions = new ConcurrentHashMap<>();
 	private final java.util.Set<String> watchingTasks = ConcurrentHashMap.newKeySet();
 	private final ExecutorService completionWatchers = Executors.newVirtualThreadPerTaskExecutor();
 	private volatile BiConsumer<String, String> completionNotifier;
@@ -51,11 +54,12 @@ public class AgentModeHandler {
 	public String handle(String sessionId, String input) {
 		if (input == null || input.isBlank()) return null;
 		String command = input.trim();
+		String normalizedSession = normalizeSession(sessionId);
 		Mode selected = parseModeCommand(command);
 		if (selected != null) {
-			modes.put(normalizeSession(sessionId), selected);
+			modes.put(normalizedSession, selected);
 			return selected == Mode.AGENT
-					? "已切换到 Agent 模式。直接说目标即可；发送“停”或“暂停”可保存进度并暂停，发送 /chat 切回聊天。"
+					? "已切换到 Agent 模式。直接说目标即可。"
 					: "已切换到聊天模式。发送 /agent 可切到自动执行模式。";
 		}
 		// WeChat commonly sends "/agent" and the goal in one message (often on
@@ -63,36 +67,56 @@ public class AgentModeHandler {
 		// task type and the completion push notification.
 		String inlineGoal = inlineAgentGoal(command);
 		if (inlineGoal != null) {
-			String normalizedSession = normalizeSession(sessionId);
 			modes.put(normalizedSession, Mode.AGENT);
+			beginNewRequest(normalizedSession);
 			return submitGoal(normalizedSession, inlineGoal);
 		}
+		if (modeOf(normalizedSession) == Mode.AGENT) {
+			String controlReply = handleNaturalControl(normalizedSession, command);
+			if (controlReply != null) return controlReply;
+		}
+		if (command.startsWith("/")) return null;
+
+		beginNewRequest(normalizedSession);
 		// A request for a ticket H5 / booking entry needs verified external data.
 		// Route it to the bounded Travel Agent even when the conversation normally
 		// stays in chat mode; otherwise the general chat model can only describe a
 		// purchase path and never invokes the FlyAI lookup or entry guard.
-		List<ConversationTurn> currentHistory = conversationMemory == null
-				? List.of() : conversationMemory.history(normalizeSession(sessionId));
+		List<ConversationTurn> currentHistory = conversationMemory == null ? List.of()
+				: ConversationContextPolicy.relevantHistory(
+						command, conversationMemory.history(normalizedSession));
 		if (taskRouter.shouldAutoStart(command, currentHistory)) {
-			return submitGoal(normalizeSession(sessionId), command);
+			return submitGoal(normalizedSession, command);
 		}
-		if (modeOf(sessionId) != Mode.AGENT || command.startsWith("/")) return null;
-		String normalizedSession = normalizeSession(sessionId);
-		String controlReply = handleNaturalControl(normalizedSession, command);
-		if (controlReply != null) return controlReply;
+		if (modeOf(normalizedSession) != Mode.AGENT) return null;
 		return submitGoal(normalizedSession, command);
 	}
 
 	private String submitGoal(String normalizedSession, String command) {
 		List<ConversationTurn> history = conversationMemory == null
-				? List.of() : conversationMemory.history(normalizedSession);
+				? List.of() : ConversationContextPolicy.relevantHistory(
+						command, conversationMemory.history(normalizedSession));
 		String taskType = taskRouter.route(command, history).name();
 		String contextualGoal = contextualGoal(command, history, taskType);
 		if (conversationMemory != null) conversationMemory.rememberIncoming(normalizedSession, command);
 		AgentTask task = agentLoop.submit(normalizedSession, taskType, contextualGoal, Duration.ZERO);
 		originalGoals.put(task.getId(), command);
+		taskVersions.put(task.getId(), sessionVersions.getOrDefault(normalizedSession, 0L));
 		watchCompletion(task);
-		return "好的，我正在处理。完成后会直接把结果发给你；你可以随时说“停”或“暂停”。";
+		return "⌁ 正在分析目标…";
+	}
+
+	private void beginNewRequest(String sessionId) {
+		sessionVersions.merge(sessionId, 1L, Long::sum);
+		for (AgentTask task : agentLoop.list(sessionId)) {
+			if (task.getStatus().isTerminal() || task.getStatus() == AgentTaskStatus.PAUSED
+					|| task.getStatus() == AgentTaskStatus.WAITING_HUMAN) continue;
+			try {
+				agentLoop.cancel(task.getId());
+			} catch (RuntimeException ignored) {
+				// The task may have reached a terminal state between list and cancel.
+			}
+		}
 	}
 
 	/** Returns an inline goal for `/agent <goal>`, excluding task-management commands. */
@@ -116,6 +140,17 @@ public class AgentModeHandler {
 
 	public Mode modeOf(String sessionId) { return modes.getOrDefault(normalizeSession(sessionId), Mode.CHAT); }
 
+	/**
+	 * Invalidates completion pushes as soon as a replacement message reaches the
+	 * transport, before message batching and model work have finished.
+	 */
+	public void onUserMessageReceived(String sessionId, String input) {
+		String command = input == null ? "" : input.trim();
+		if (command.startsWith("/") && inlineAgentGoal(command) == null) return;
+		if (isNaturalControlCommand(command)) return;
+		sessionVersions.merge(normalizeSession(sessionId), 1L, Long::sum);
+	}
+
 	/** The WeChat transport registers its safe push function after it is online. */
 	public void setCompletionNotifier(BiConsumer<String, String> completionNotifier) {
 		this.completionNotifier = completionNotifier;
@@ -126,18 +161,35 @@ public class AgentModeHandler {
 		if (!watchingTasks.add(submitted.getId())) return;
 		completionWatchers.submit(() -> {
 			try {
+				Thread.sleep(1_500);
 				long deadline = Math.max(System.currentTimeMillis() + 1_000, submitted.getDeadlineAtMs() + 5_000);
+				boolean executionProgressSent = false;
+				boolean verificationProgressSent = false;
 				while (System.currentTimeMillis() < deadline) {
 					AgentTask current = agentLoop.get(submitted.getId());
+					if (!isCurrent(current)) {
+						originalGoals.remove(current.getId());
+						taskVersions.remove(current.getId());
+						return;
+					}
 					if (current.getStatus().isTerminal()) {
 						String result = completionMessage(current);
 						String originalGoal = originalGoals.remove(current.getId());
+						taskVersions.remove(current.getId());
 						if (conversationMemory != null && originalGoal != null) {
 							conversationMemory.remember(current.getSessionId(), originalGoal, result);
 						}
 						BiConsumer<String, String> notifier = completionNotifier;
 						if (notifier != null) notifier.accept(current.getSessionId(), result);
 						return;
+					}
+					BiConsumer<String, String> notifier = completionNotifier;
+					if (!executionProgressSent && current.getStepCount() > 0 && notifier != null) {
+						notifier.accept(current.getSessionId(), "⌁ 已确定执行路径，正在获取和核对信息…");
+						executionProgressSent = true;
+					} else if (!verificationProgressSent && current.getStepCount() > 1 && notifier != null) {
+						notifier.accept(current.getSessionId(), "⌁ 已获得阶段结果，正在检查是否完整…");
+						verificationProgressSent = true;
 					}
 					Thread.sleep(750);
 				}
@@ -149,6 +201,13 @@ public class AgentModeHandler {
 				watchingTasks.remove(submitted.getId());
 			}
 		});
+	}
+
+	private boolean isCurrent(AgentTask task) {
+		long submittedVersion = taskVersions.getOrDefault(task.getId(), -1L);
+		long currentVersion = sessionVersions.getOrDefault(
+				normalizeSession(task.getSessionId()), 0L);
+		return submittedVersion == currentVersion;
 	}
 
 	private String handleNaturalControl(String sessionId, String command) {
@@ -168,8 +227,9 @@ public class AgentModeHandler {
 						"\n完成后请使用 /agent " + displayId(task) + " 人工 <处理结果> 提交结果并继续。";
 			}
 			AgentTask resumed = agentLoop.resume(task.getId());
+			taskVersions.put(resumed.getId(), sessionVersions.getOrDefault(sessionId, 0L));
 			watchCompletion(resumed);
-			return "好的，我从上次保存的位置继续处理。";
+			return "⌁ 正在从已保存的进度继续…";
 		}
 		if (matches(command, "任务进度", "查看任务", "现在做到哪了")) {
 			AgentTask task = latestAny(sessionId);
@@ -178,6 +238,13 @@ public class AgentModeHandler {
 					+ task.getStepCount() + "/" + task.getMaxSteps() + "。";
 		}
 		return null;
+	}
+
+	private static boolean isNaturalControlCommand(String command) {
+		return matches(command, "停", "暂停", "停止", "停一下", "先停", "先暂停", "别执行了", "先别做了",
+				"停止任务", "暂停任务", "先停一下", "暂停一下",
+				"继续", "恢复", "接着做", "恢复任务", "继续任务", "继续执行",
+				"任务进度", "查看任务", "现在做到哪了");
 	}
 
 	private AgentTask latest(String sessionId, boolean resumable) {

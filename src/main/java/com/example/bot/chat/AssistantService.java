@@ -107,7 +107,8 @@ public class AssistantService {
 	}
 
 	public AssistantReply reply(String sessionId, String question) {
-		List<ConversationTurn> history = conversationMemory.history(sessionId);
+		List<ConversationTurn> history = ConversationContextPolicy.relevantHistory(
+				question, conversationMemory.history(sessionId));
 		conversationMemory.rememberIncoming(sessionId, question);
 		try {
 			String ragContext = enrich(sessionId, question, history, List.of());

@@ -259,6 +259,7 @@ public class IlinkChatRunner {
 
 	private void queueQuestion(AccountRuntime runtime, String peerUserId, String question, List<MediaContent> media) {
 		String sessionId = sessionId(runtime.accountId, peerUserId);
+		agentModeHandler.onUserMessageReceived(sessionId, question);
 		long messageVersion = userMessageVersions.computeIfAbsent(sessionId, ignored -> new AtomicLong())
 				.incrementAndGet();
 		PendingBatch batch = pendingBatches.computeIfAbsent(sessionId,

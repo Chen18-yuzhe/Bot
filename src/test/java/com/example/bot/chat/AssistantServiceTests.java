@@ -175,4 +175,37 @@ class AssistantServiceTests {
 
 		assertEquals("你叫小陈。", answer);
 	}
+
+	@Test
+	void shouldDropAnUnfinishedPreviousTaskForANewStandaloneQuestion() {
+		ConversationMemory memory = new ConversationMemory(8, 30);
+		AssistantService service = new AssistantService(
+				functionCallingService, memory, visualUnderstandingService);
+		String sessionId = "topic-switch-session";
+		memory.remember(sessionId, "列出我的B站收藏夹",
+				"当前会话未获准访问私人 Bilibili 收藏夹；请配置 BILI_ALLOWED_SESSION_IDS");
+		when(functionCallingService.reply(sessionId, "会话定位0731", List.of()))
+				.thenReturn(AssistantReply.text("这是一个新的独立问题。"));
+
+		AssistantReply reply = service.reply(sessionId, "会话定位0731");
+
+		assertEquals("这是一个新的独立问题。", reply.text());
+	}
+
+	@Test
+	void shouldKeepAnUnfinishedPreviousTaskWhenUserExplicitlyContinuesIt() {
+		ConversationMemory memory = new ConversationMemory(8, 30);
+		AssistantService service = new AssistantService(
+				functionCallingService, memory, visualUnderstandingService);
+		String sessionId = "explicit-follow-up-session";
+		ConversationTurn previous = new ConversationTurn("列出我的B站收藏夹",
+				"当前会话未获准访问私人 Bilibili 收藏夹；请配置 BILI_ALLOWED_SESSION_IDS");
+		memory.remember(sessionId, previous.userMessage(), previous.assistantMessage());
+		when(functionCallingService.reply(sessionId, "继续刚才的收藏夹问题", List.of(previous)))
+				.thenReturn(AssistantReply.text("继续处理。"));
+
+		AssistantReply reply = service.reply(sessionId, "继续刚才的收藏夹问题");
+
+		assertEquals("继续处理。", reply.text());
+	}
 }
