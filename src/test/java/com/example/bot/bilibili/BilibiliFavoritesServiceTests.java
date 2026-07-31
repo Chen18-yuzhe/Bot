@@ -19,9 +19,11 @@ import com.example.bot.knowledge.KnowledgeBaseService;
 
 class BilibiliFavoritesServiceTests {
 	private final FavService sdk = mock(FavService.class);
+	private final BilibiliLiveApi liveApi = mock(BilibiliLiveApi.class);
 	private final KnowledgeBaseService knowledge = mock(KnowledgeBaseService.class);
 	private final BilibiliFavoritesService service = new BilibiliFavoritesService(
-			"SESSDATA=secret; DedeUserID=123", "account::owner", knowledge, cookie -> sdk);
+			"SESSDATA=secret; DedeUserID=123", "account::owner", knowledge,
+			cookie -> sdk, liveApi);
 
 	@Test
 	void accessIsDeniedUnlessTheExactSessionIsAllowlisted() {
@@ -34,7 +36,8 @@ class BilibiliFavoritesServiceTests {
 
 	@Test
 	void listsFoldersWithoutReturningTheCookie() throws Exception {
-		when(sdk.listFavFolders()).thenReturn(Map.of(2L, "稍后看", 1L, "Java"));
+		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+				.thenReturn(Map.of(2L, "稍后看", 1L, "Java"));
 
 		var folders = service.listFolders();
 
@@ -44,21 +47,38 @@ class BilibiliFavoritesServiceTests {
 	}
 
 	@Test
-	void searchesMetadataAndSubtitleLocally() {
-		BiliVideo video = video("BV1234567890", "Spring Agent", "张三", 8L);
-		when(sdk.listAllVideos()).thenReturn(List.of(video));
+	void listsOnlyVideosReturnedByTheOwnedLiveFolder() throws Exception {
+		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+				.thenReturn(Map.of(8L, "默认收藏夹"));
+		when(liveApi.listFolderVideos("SESSDATA=secret; DedeUserID=123", 8L))
+				.thenReturn(List.of(new BilibiliLiveApi.LiveVideo(
+						"BV1234567890", "Spring Agent", "description", "张三", 120, 8L)));
 		when(sdk.getSubtitleText("BV1234567890")).thenReturn("这里讲解 Function Calling");
 
-		var result = service.listVideos("Function Calling", 10);
+		var result = service.listVideos(8L, "", 10);
 
 		assertThat(result).hasSize(1);
-		assertThat(result.getFirst().hasSubtitle()).isTrue();
-		assertThat(result.getFirst().subtitleExcerpt()).contains("Function Calling");
+		assertThat(result.getFirst().title()).isEqualTo("Spring Agent");
+		assertThat(result.getFirst().hasSubtitle()).isFalse();
+	}
+
+	@Test
+	void rejectsFolderIdsThatDoNotBelongToTheCurrentCookie() throws Exception {
+		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+				.thenReturn(Map.of(8L, "默认收藏夹"));
+
+		assertThatThrownBy(() -> service.listVideos(999L, "", 10))
+				.hasMessageContaining("当前 Bilibili 账号不存在收藏夹 999");
 	}
 
 	@Test
 	void syncsSubtitlesAndUpsertsKnowledgeDocuments() throws Exception {
 		BiliVideo video = video("BV1234567890", "Java 教程", "张三", 8L);
+		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+				.thenReturn(Map.of(8L, "默认收藏夹"));
+		when(liveApi.listFolderVideos("SESSDATA=secret; DedeUserID=123", 8L))
+				.thenReturn(List.of(new BilibiliLiveApi.LiveVideo(
+						"BV1234567890", "Java 教程", "description", "张三", 120, 8L)));
 		when(sdk.fetchFavWithSubtitle(8L)).thenReturn(1);
 		when(sdk.countWithSubtitle()).thenReturn(1);
 		when(sdk.listAllVideos()).thenReturn(List.of(video));

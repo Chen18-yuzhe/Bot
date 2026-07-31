@@ -42,4 +42,24 @@ class BilibiliFavoritesToolTests {
 		assertThat(result.content()).contains("\"syncedVideos\":3");
 		verify(favorites).requireAuthorized("account::owner");
 	}
+
+	@Test
+	void requiresAndPassesTheLiveFolderIdWhenListingVideos() {
+		when(favorites.listVideos(42L, "", 10)).thenReturn(java.util.List.of());
+
+		tool.execute(mapper.createObjectNode()
+				.put("action", "list_videos").put("folderId", 42),
+				new ToolContext("account::owner", "查看默认收藏夹视频"));
+
+		verify(favorites).listVideos(42L, "", 10);
+	}
+
+	@Test
+	void refusesToListVideosWithoutAFolderId() {
+		assertThatThrownBy(() -> tool.execute(mapper.createObjectNode()
+				.put("action", "list_videos"),
+				new ToolContext("account::owner", "查看收藏夹视频")))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("folderId");
+	}
 }

@@ -32,6 +32,7 @@ public class BilibiliFavoritesService {
 	private static final int MAX_KNOWLEDGE_CHARS = 200_000;
 
 	private final Function<String, FavService> clientFactory;
+	private final BilibiliLiveApi liveApi;
 	private final KnowledgeBaseService knowledgeBase;
 	private final String configuredCookie;
 	private final Set<String> allowedSessionIds;
@@ -41,17 +42,18 @@ public class BilibiliFavoritesService {
 	@Autowired
 	public BilibiliFavoritesService(@Value("${bilibili.cookie:}") String configuredCookie,
 			@Value("${bilibili.allowed-session-ids:}") String allowedSessionIds,
-			KnowledgeBaseService knowledgeBase) {
-		this(configuredCookie, allowedSessionIds, knowledgeBase, FavService::new);
+			KnowledgeBaseService knowledgeBase, BilibiliLiveApi liveApi) {
+		this(configuredCookie, allowedSessionIds, knowledgeBase, FavService::new, liveApi);
 	}
 
 	BilibiliFavoritesService(String configuredCookie, String allowedSessionIds,
 			KnowledgeBaseService knowledgeBase,
-			Function<String, FavService> clientFactory) {
+			Function<String, FavService> clientFactory, BilibiliLiveApi liveApi) {
 		this.configuredCookie = clean(configuredCookie);
 		this.allowedSessionIds = parseAllowedSessions(allowedSessionIds);
 		this.knowledgeBase = knowledgeBase;
 		this.clientFactory = clientFactory;
+		this.liveApi = liveApi;
 	}
 
 	public synchronized boolean authenticated() {
@@ -85,7 +87,7 @@ public class BilibiliFavoritesService {
 
 	public synchronized List<Folder> listFolders() {
 		try {
-			return client().listFavFolders().entrySet().stream()
+			return liveApi.listFolders(activeCookie()).entrySet().stream()
 					.map(entry -> new Folder(entry.getKey(), entry.getValue()))
 					.sorted(Comparator.comparing(Folder::name, String.CASE_INSENSITIVE_ORDER))
 					.toList();
@@ -97,6 +99,7 @@ public class BilibiliFavoritesService {
 	public synchronized SyncResult syncFolder(long folderId, boolean includeSubtitles) {
 		if (folderId <= 0) throw new IllegalArgumentException("folderId 必须为正整数");
 		try {
+			requireOwnedFolder(folderId);
 			int synced = includeSubtitles
 					? client().fetchFavWithSubtitle(folderId)
 					: client().fetchFavMeta(folderId);
@@ -107,16 +110,46 @@ public class BilibiliFavoritesService {
 	}
 
 	public synchronized List<Video> listVideos(String query, int requestedLimit) {
+		try {
+			List<Video> result = new ArrayList<>();
+			for (Folder folder : listFolders()) {
+				appendLiveVideos(result, folder.id(), query, requestedLimit);
+				if (result.size() >= boundedLimit(requestedLimit)) break;
+			}
+			return List.copyOf(result);
+		} catch (Exception error) {
+			throw upstream("读取 Bilibili 视频列表失败", error);
+		}
+	}
+
+	public synchronized List<Video> listVideos(long folderId, String query, int requestedLimit) {
+		if (folderId <= 0) throw new IllegalArgumentException("folderId 必须为正整数");
+		try {
+			requireOwnedFolder(folderId);
+			List<Video> result = new ArrayList<>();
+			appendLiveVideos(result, folderId, query, requestedLimit);
+			return List.copyOf(result);
+		} catch (Exception error) {
+			throw upstream("读取 Bilibili 收藏夹视频失败", error);
+		}
+	}
+
+	private void appendLiveVideos(List<Video> result, long folderId, String query, int requestedLimit)
+			throws Exception {
 		String keyword = normalizeQuery(query);
-		int limit = Math.max(1, Math.min(50, requestedLimit));
-		List<Video> result = new ArrayList<>();
-		for (BiliVideo video : client().listAllVideos()) {
-			String subtitle = client().getSubtitleText(video.getBvId());
+		int limit = boundedLimit(requestedLimit);
+		for (BilibiliLiveApi.LiveVideo video : liveApi.listFolderVideos(activeCookie(), folderId)) {
+			String subtitle = cachedSubtitle(video.bvId());
 			if (!matches(video, subtitle, keyword)) continue;
 			result.add(toVideo(video, subtitle));
 			if (result.size() >= limit) break;
 		}
-		return List.copyOf(result);
+	}
+
+	private String cachedSubtitle(String bvId) {
+		if (client == null || bvId == null || bvId.isBlank()) return "";
+		String subtitle = client.getSubtitleText(bvId);
+		return subtitle == null ? "" : subtitle;
 	}
 
 	public synchronized String subtitle(String bvId) {
@@ -128,9 +161,19 @@ public class BilibiliFavoritesService {
 
 	public synchronized IngestResult syncAndIngest(long folderId, String sessionId) {
 		SyncResult sync = syncFolder(folderId, true);
+		Set<String> liveVideoIds;
+		try {
+			liveVideoIds = liveApi.listFolderVideos(activeCookie(), folderId).stream()
+					.map(BilibiliLiveApi.LiveVideo::bvId)
+					.filter(id -> !id.isBlank())
+					.collect(Collectors.toUnmodifiableSet());
+		} catch (Exception error) {
+			throw upstream("核对 Bilibili 收藏夹实时内容失败", error);
+		}
 		int imported = 0;
 		for (BiliVideo video : client().listAllVideos()) {
 			if (video.getFavId() == null || video.getFavId().longValue() != folderId) continue;
+			if (!liveVideoIds.contains(video.getBvId())) continue;
 			String subtitle = client().getSubtitleText(video.getBvId());
 			if (subtitle == null || subtitle.isBlank()) continue;
 			String content = knowledgeDocument(video, subtitle);
@@ -159,6 +202,12 @@ public class BilibiliFavoritesService {
 		return runtimeCookie.isBlank() ? configuredCookie : runtimeCookie;
 	}
 
+	private void requireOwnedFolder(long folderId) throws Exception {
+		if (!liveApi.listFolders(activeCookie()).containsKey(folderId)) {
+			throw new IllegalArgumentException("当前 Bilibili 账号不存在收藏夹 " + folderId);
+		}
+	}
+
 	private void closeClient() {
 		if (client == null) return;
 		client.close();
@@ -180,11 +229,33 @@ public class BilibiliFavoritesService {
 		return false;
 	}
 
+	private static boolean matches(BilibiliLiveApi.LiveVideo video, String subtitle, String keyword) {
+		if (keyword.isBlank()) return true;
+		String haystack = String.join("\n",
+				clean(video.title()), clean(video.description()), clean(video.upName()),
+				clean(video.bvId()), clean(subtitle)).toLowerCase(Locale.ROOT);
+		for (String token : keyword.split("\\s+")) {
+			if (!token.isBlank() && haystack.contains(token)) return true;
+		}
+		return false;
+	}
+
 	private static Video toVideo(BiliVideo video, String subtitle) {
 		String text = clean(subtitle);
 		String excerpt = text.length() <= 500 ? text : text.substring(0, 500) + "…";
 		return new Video(video.getBvId(), video.getTitle(), video.getDescription(), video.getUpName(),
 				video.getDuration(), video.getFavId(), !text.isBlank(), excerpt);
+	}
+
+	private static Video toVideo(BilibiliLiveApi.LiveVideo video, String subtitle) {
+		String text = clean(subtitle);
+		String excerpt = text.length() <= 500 ? text : text.substring(0, 500) + "…";
+		return new Video(video.bvId(), video.title(), video.description(), video.upName(),
+				video.durationSeconds(), video.folderId(), !text.isBlank(), excerpt);
+	}
+
+	private static int boundedLimit(int requestedLimit) {
+		return Math.max(1, Math.min(50, requestedLimit));
 	}
 
 	private static String knowledgeDocument(BiliVideo video, String subtitle) {

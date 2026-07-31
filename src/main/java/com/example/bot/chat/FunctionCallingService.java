@@ -124,7 +124,11 @@ public class FunctionCallingService {
 		GeneratedImage generatedImage = null;
 		GeneratedDocument generatedDocument = null;
 		GeneratedAudio generatedAudio = null;
-		String forcedTool = forcedTool(question, context, media);
+		String selectedTool = forcedTool(question, context, media);
+		if (selectedTool == null && isBilibiliFollowUp(question, history)) {
+			selectedTool = "manage_bilibili_favorites";
+		}
+		final String forcedTool = selectedTool;
 		ToolChainGuard chainGuard = new ToolChainGuard();
 		boolean guardInstructionAdded = false;
 		configureEndpoint();
@@ -281,6 +285,23 @@ public class FunctionCallingService {
 		if (CALCULATION_REQUEST.matcher(value).matches()) return "scientific_calculator";
 		if (BILIBILI_REQUEST.matcher(value).matches()) return "manage_bilibili_favorites";
 		return null;
+	}
+
+	static boolean isBilibiliFollowUp(String question, List<ConversationTurn> history) {
+		if (history == null || history.isEmpty()) return false;
+		String current = question == null ? "" : question.trim().toLowerCase(java.util.Locale.ROOT);
+		if (current.matches(".*(?:天气|温度|几点|时间|提醒|图片|画图|旅行|旅游|门票|酒店|计算).*")) {
+			return false;
+		}
+		if (current.length() > 40 || !current.matches(
+				".*(?:我要看|看看|查看|打开|里面|视频|继续|默认收藏夹|第[一二三四五六七八九十\\d]+个).*")) {
+			return false;
+		}
+		ConversationTurn last = history.get(history.size() - 1);
+		String previous = (String.valueOf(last.userMessage()) + "\n"
+				+ String.valueOf(last.assistantMessage())).toLowerCase(java.util.Locale.ROOT);
+		return previous.contains("b站") || previous.contains("bilibili")
+				|| previous.contains("哔哩哔哩") || previous.contains("收藏夹");
 	}
 
 	private void configureEndpoint() {

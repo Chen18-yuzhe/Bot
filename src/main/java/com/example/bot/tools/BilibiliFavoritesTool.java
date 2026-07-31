@@ -16,15 +16,15 @@ public class BilibiliFavoritesTool implements AssistantTool {
 			.name("manage_bilibili_favorites")
 			.description("""
 					管理当前获准会话对应的私人 Bilibili 收藏夹和本地字幕库。可检查登录、列出收藏夹、
-					同步视频元数据或字幕、检索已同步视频、读取单个 BV 号字幕，以及把一个收藏夹的字幕
+					同步视频元数据或字幕、实时列出收藏夹视频、读取单个 BV 号字幕，以及把一个收藏夹的字幕
 					导入当前机器人的个人知识库。不得编造收藏夹或字幕。
 					""".trim())
 			.parameters(JsonParser.parseString("""
 					{"type":"object","properties":{
 					  "action":{"type":"string","enum":["status","list_folders","sync_folder","list_videos","get_subtitle","ingest_folder"],"description":"要执行的操作"},
-					  "folderId":{"type":"integer","minimum":1,"description":"收藏夹 ID；同步和导入时必填"},
+					  "folderId":{"type":"integer","minimum":1,"description":"收藏夹 ID；列视频、同步和导入时必填。必须先从 list_folders 的真实结果取得，禁止猜测"},
 					  "includeSubtitles":{"type":"boolean","description":"sync_folder 是否同时抓取字幕，默认 false"},
-					  "query":{"type":"string","maxLength":160,"description":"本地视频标题、UP主、简介或字幕关键词"},
+					  "query":{"type":"string","maxLength":160,"description":"可选的视频标题、UP主、简介或字幕关键词；列出全部时不要传"},
 					  "limit":{"type":"integer","minimum":1,"maximum":50,"description":"最多返回的视频数，默认 10"},
 					  "bvId":{"type":"string","description":"需要读取字幕的 BV 号"}
 					},"required":["action"],"additionalProperties":false}
@@ -50,7 +50,8 @@ public class BilibiliFavoritesTool implements AssistantTool {
 			case "sync_folder" -> favorites.syncFolder(
 					requiredFolderId(arguments), arguments.path("includeSubtitles").asBoolean(false));
 			case "list_videos" -> favorites.listVideos(
-					arguments.path("query").asText(""), arguments.path("limit").asInt(10));
+					requiredFolderId(arguments), arguments.path("query").asText(""),
+					arguments.path("limit").asInt(10));
 			case "get_subtitle" -> {
 				String subtitle = favorites.subtitle(arguments.path("bvId").asText(""));
 				if (subtitle.isBlank()) yield new EmptySubtitle(arguments.path("bvId").asText(""));

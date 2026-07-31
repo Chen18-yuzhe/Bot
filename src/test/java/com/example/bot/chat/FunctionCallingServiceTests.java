@@ -54,4 +54,13 @@ class FunctionCallingServiceTests {
 		assertTrue(FunctionCallingService.safeToolErrorMessage(
 				new IllegalArgumentException("x".repeat(400))).length() <= 301);
 	}
+
+	@Test
+	void shouldForceBilibiliToolForAShortFavoritesFollowUp() {
+		List<ConversationTurn> history = List.of(new ConversationTurn(
+				"列出我的B站收藏夹", "默认收藏夹（ID：2769950940）"));
+
+		assertTrue(FunctionCallingService.isBilibiliFollowUp("我要看", history));
+		assertFalse(FunctionCallingService.isBilibiliFollowUp("我要看北京天气", history));
+	}
 }
