@@ -15,7 +15,7 @@ import com.example.bot.chat.ConversationTurn;
 class AgentTaskRouterTests {
 	private final AgentTaskRouter router = new AgentTaskRouter(List.of(
 			new GenericTaskType(), new DecisionTaskType(), new LearningCoachTaskType(),
-			new DeepResearchTaskType(), new TravelTaskType()));
+			new DeepResearchTaskType(), new TravelTaskType(), new BilibiliFavoritesTaskType()));
 
 	@Test
 	void discoversAndRoutesSpecializedTaskTypesWithoutCentralBranches() {
@@ -23,6 +23,8 @@ class AgentTaskRouterTests {
 		assertEquals(DeepResearchTaskType.NAME, router.route("调研国内 AI 编程助手并输出行业报告", List.of()).name());
 		assertEquals(LearningCoachTaskType.NAME, router.route("给我一份六周 Spring Boot 学习计划", List.of()).name());
 		assertEquals(DecisionTaskType.NAME, router.route("帮我做 PostgreSQL 和 MySQL 技术选型", List.of()).name());
+		assertEquals(BilibiliFavoritesTaskType.NAME,
+				router.route("列出我的B站收藏夹", List.of()).name());
 		assertEquals(GenericTaskType.NAME, router.route("帮我算一道题", List.of()).name());
 	}
 
@@ -33,6 +35,17 @@ class AgentTaskRouterTests {
 		assertEquals(TravelTaskType.NAME, router.route("第二个呢", history).name());
 		assertTrue(router.shouldAutoStart("给我故宫门票 H5 链接", List.of()));
 		assertFalse(router.shouldAutoStart("做一份 AI 行业研究报告", List.of()));
+	}
+
+	@Test
+	void explicitBilibiliRequestIsNotHijackedByTravelHistory() {
+		List<ConversationTurn> history = List.of(
+				new ConversationTurn("给我故宫门票 H5 链接",
+						"美团入口：https://www.meituan.com/"));
+
+		assertFalse(router.shouldAutoStart("列出我的B站收藏夹", history));
+		assertEquals(BilibiliFavoritesTaskType.NAME,
+				router.route("列出我的B站收藏夹", history).name());
 	}
 
 	@ParameterizedTest(name = "{0} -> {1}")

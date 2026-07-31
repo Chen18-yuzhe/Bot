@@ -37,6 +37,14 @@ public class AgentTaskRouter {
 	}
 
 	public boolean shouldAutoStart(String command, List<ConversationTurn> history) {
+		String currentRequest = requestContext(command, List.of());
+		var explicitType = taskTypes.stream()
+				.filter(type -> !GenericTaskType.NAME.equals(type.name()))
+				.filter(type -> type.supports(currentRequest))
+				.findFirst();
+		if (explicitType.isPresent()) {
+			return explicitType.get().autoStart(currentRequest);
+		}
 		String context = requestContext(command, history);
 		return taskTypes.stream().anyMatch(type -> type.supports(context) && type.autoStart(context));
 	}
