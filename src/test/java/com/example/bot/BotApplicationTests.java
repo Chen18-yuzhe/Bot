@@ -23,7 +23,7 @@ class BotApplicationTests {
 				"travel_plan", "travel_ticket", "travel_ticket_market", "travel_order",
 				"travel_checkout", "travel_purchase_entry", "travel_purchase_links",
 				"travel_ticket_platform_entries", "travel_transport",
-				"travel_fliggy_search", "manage_bilibili_favorites"),
+				"travel_fliggy_search", "manage_bilibili_favorites", "remember_user_profile"),
 				Set.copyOf(registry.names()));
 	}
 

@@ -4,31 +4,27 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
-import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversation;
-import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationParam;
-import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationResult;
-import com.alibaba.dashscope.common.MultiModalMessage;
-import com.alibaba.dashscope.common.Role;
-import com.alibaba.dashscope.tools.ToolCallBase;
-import com.alibaba.dashscope.tools.ToolCallFunction;
-import com.alibaba.dashscope.utils.Constants;
 import com.example.bot.ApplicationException;
+import com.example.bot.audio.GeneratedAudio;
+import com.example.bot.document.GeneratedDocument;
+import com.example.bot.ilink.UserNameService;
+import com.example.bot.model.ChatMessage;
+import com.example.bot.model.ChatModel;
+import com.example.bot.model.ChatRequest;
+import com.example.bot.model.ChatResponse;
+import com.example.bot.model.ToolCall;
+import com.example.bot.monitoring.ToolMetricsService;
 import com.example.bot.tools.AssistantTool;
 import com.example.bot.tools.AssistantToolRegistry;
 import com.example.bot.tools.ToolContext;
 import com.example.bot.tools.ToolResult;
-import com.example.bot.audio.GeneratedAudio;
-import com.example.bot.document.GeneratedDocument;
-import com.example.bot.monitoring.ToolMetricsService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -71,29 +67,28 @@ public class FunctionCallingService {
 			营养和体脂结果仅作一般参考，应说明食材、品牌、烹饪方式和围度测量误差会影响结果。
 			联网搜索工具返回来源链接时必须保留来源，不得删除或伪造链接。
 			Bilibili 收藏夹属于私人数据，只能通过收藏夹工具读取；会话未获授权时不得尝试绕过或推测内容。
+			用户用自然语言明确提供未来仍有帮助的个人长期资料时，调用长期用户资料工具永久保存、更新或清除；不要求固定句式。
+			可保存称呼、用户明确自述的健康状况与过敏、长期偏好和固定限制。不得保存临时任务、第三人信息、引用、推测、模型诊断或账号秘密；不确定时先追问。
 			当前这条用户消息始终是首要目标。只有用户明确说“继续、刚才、这个、那个”等指代时，才延续上一轮；
 			新问题不得被上一轮未完成、失败或待授权的任务劫持，也不得重复上一轮的错误提示或工具调用。
 			人物文生图必须明确为成年人；不要在提示词中保留真实艺术家、导演或摄影师姓名，改写为可观察的视觉特征。
 			不要向用户展示工具名、JSON 参数或内部执行过程。
 			""";
 
-	private final String apiKey;
-	private final String baseUrl;
-	private final DashScopeModelFallback modelFallback;
+	private final ChatModel chatModel;
 	private final AssistantToolRegistry registry;
 	private final ObjectMapper objectMapper;
 	private final ToolMetricsService metrics;
+	private final UserNameService userProfiles;
 
-	public FunctionCallingService(@Value("${aliyun.dashscope.api-key:}") String apiKey,
-			@Value("${aliyun.dashscope.base-url:}") String baseUrl,
-			DashScopeModelFallback modelFallback,
-			AssistantToolRegistry registry, ObjectMapper objectMapper, ToolMetricsService metrics) {
-		this.apiKey = apiKey;
-		this.baseUrl = baseUrl;
-		this.modelFallback = modelFallback;
+	public FunctionCallingService(ChatModel chatModel,
+			AssistantToolRegistry registry, ObjectMapper objectMapper, ToolMetricsService metrics,
+			UserNameService userProfiles) {
+		this.chatModel = chatModel;
 		this.registry = registry;
 		this.objectMapper = objectMapper;
 		this.metrics = metrics;
+		this.userProfiles = userProfiles;
 	}
 
 	public AssistantReply reply(String sessionId, String question, List<ConversationTurn> history) {
@@ -106,21 +101,20 @@ public class FunctionCallingService {
 
 	public AssistantReply reply(String sessionId, String question, List<ConversationTurn> history,
 			String context, List<MediaContent> media) {
-		if (apiKey == null || apiKey.isBlank()) {
-			throw new ApplicationException(HttpStatus.SERVICE_UNAVAILABLE, "请先配置环境变量 DASHSCOPE_API_KEY");
-		}
-		List<Object> messages = new ArrayList<>();
-		messages.add(message(Role.SYSTEM.getValue(), SYSTEM_PROMPT));
-		messages.add(message(Role.SYSTEM.getValue(), "当前北京时间：" +
+		List<ChatMessage> messages = new ArrayList<>();
+		messages.add(ChatMessage.system(SYSTEM_PROMPT));
+		messages.add(ChatMessage.system("当前北京时间：" +
 				ZonedDateTime.now(ZoneId.of("Asia/Shanghai")) + "。创建提醒时必须使用带时区的 ISO-8601 时间。"));
-		if (context != null && !context.isBlank()) messages.add(message(Role.SYSTEM.getValue(), context));
+		String userProfileContext = userProfiles.modelContext(sessionId);
+		if (!userProfileContext.isBlank()) messages.add(ChatMessage.system(userProfileContext));
+		if (context != null && !context.isBlank()) messages.add(ChatMessage.system(context));
 		if (history != null) {
 			for (ConversationTurn turn : history) {
-				messages.add(message(Role.USER.getValue(), turn.userMessage()));
-				messages.add(message(Role.ASSISTANT.getValue(), turn.assistantMessage()));
+				messages.add(ChatMessage.user(turn.userMessage()));
+				messages.add(ChatMessage.assistant(turn.assistantMessage(), List.of()));
 			}
 		}
-		messages.add(message(Role.USER.getValue(), question));
+		messages.add(ChatMessage.user(question));
 		GeneratedImage generatedImage = null;
 		GeneratedDocument generatedDocument = null;
 		GeneratedAudio generatedAudio = null;
@@ -131,11 +125,10 @@ public class FunctionCallingService {
 		final String forcedTool = selectedTool;
 		ToolChainGuard chainGuard = new ToolChainGuard();
 		boolean guardInstructionAdded = false;
-		configureEndpoint();
 		try {
 			for (int round = 0; round <= MAX_TOOL_ROUNDS; round++) {
 				if (chainGuard.halted() && !guardInstructionAdded) {
-					messages.add(message(Role.SYSTEM.getValue(), "工具链保护已触发：" + chainGuard.haltReason()
+					messages.add(ChatMessage.system("工具链保护已触发：" + chainGuard.haltReason()
 							+ "。禁止继续调用任何工具；请基于已有结果回答，并只询问一个最关键的澄清问题。"));
 					guardInstructionAdded = true;
 				}
@@ -144,27 +137,14 @@ public class FunctionCallingService {
 				if (forceToolThisRound) {
 					log.info("明确能力请求，强制选择 Function Calling 工具：{}", forcedTool);
 				}
-				MultiModalConversationResult response = modelFallback.call("Function Calling", model -> {
-					var requestBuilder = MultiModalConversationParam.builder()
-							.apiKey(apiKey).model(model).messages(messages)
-							.tools(registry.definitions()).parallelToolCalls(false)
-							.enableThinking(false).maxTokens(1600);
-					if (toolsHalted) {
-						requestBuilder.toolChoice("none");
-					} else if (forceToolThisRound) {
-						requestBuilder.toolChoice(registry.definition(forcedTool));
-						log.info("Function Calling 使用模型：{}", model);
-					} else {
-						requestBuilder.toolChoice("auto");
-					}
-					return new MultiModalConversation().call(requestBuilder.build());
-				});
-				MultiModalMessage assistant = response.getOutput().getChoices().get(0).getMessage();
-				messages.add(assistant);
-				List<ToolCallBase> calls = assistant.getToolCalls();
-				if (calls == null || calls.isEmpty()) {
-					String answer = assistant.getContent().stream().filter(part -> part.containsKey("text"))
-							.map(part -> String.valueOf(part.get("text"))).findFirst().orElse("");
+				ChatRequest.ToolChoice toolChoice = toolsHalted ? ChatRequest.ToolChoice.none()
+						: forceToolThisRound ? ChatRequest.ToolChoice.forced(forcedTool)
+						: ChatRequest.ToolChoice.auto();
+				ChatResponse response = chatModel.chat(new ChatRequest(messages, registry.definitions(), 1600,
+						toolChoice));
+				messages.add(ChatMessage.assistant(response.text(), response.toolCalls()));
+				if (!response.requestsTools()) {
+					String answer = response.text();
 					if (answer == null || answer.isBlank()) {
 						answer = generatedImage != null ? "图片处理好了 🎨"
 								: generatedDocument != null ? "文件处理好了。"
@@ -180,15 +160,14 @@ public class FunctionCallingService {
 					return AssistantReply.text("我还缺少完成这个请求的必要信息。请把目标、范围或关键参数说得更具体一些，我再继续处理。");
 				}
 				if (round == MAX_TOOL_ROUNDS) throw new IllegalStateException("工具调用次数超过限制");
-				for (ToolCallBase base : calls) {
-					if (!(base instanceof ToolCallFunction call)) throw new IllegalArgumentException("不支持的工具调用类型");
-					String name = call.getFunction().getName();
-					JsonNode arguments = objectMapper.readTree(call.getFunction().getArguments());
+				for (ToolCall call : response.toolCalls()) {
+					String name = call.name();
+					JsonNode arguments = objectMapper.readTree(call.argumentsJson());
 					AssistantTool tool = registry.require(name);
 					ToolChainGuard.Decision decision = chainGuard.beforeCall(name, arguments);
 					if (!decision.allowed()) {
 						log.warn("阻止 Function Calling：{}，轮次={}，原因={}", name, round + 1, decision.code());
-						messages.add(toolMessage(call, name, toolFailureContent(name,
+						messages.add(ChatMessage.tool(call.id(), name, toolFailureContent(name,
 								decision.code(), decision.message(), false)));
 						continue;
 					}
@@ -205,14 +184,14 @@ public class FunctionCallingService {
 						metrics.failure(invocation, toolError.getMessage());
 						chainGuard.failure(name);
 						log.warn("Function Calling 工具执行失败：{}，原因={}", name, toolError.getMessage());
-						messages.add(toolMessage(call, name, toolFailureContent(name,
+						messages.add(ChatMessage.tool(call.id(), name, toolFailureContent(name,
 								"TOOL_EXECUTION_FAILED", safeToolErrorMessage(toolError), !chainGuard.halted())));
 						continue;
 					}
 					if (result.image() != null) generatedImage = result.image();
 					if (result.document() != null) generatedDocument = result.document();
 					if (result.audio() != null) generatedAudio = result.audio();
-					messages.add(toolMessage(call, name, result.content()));
+					messages.add(ChatMessage.tool(call.id(), name, result.content()));
 				}
 			}
 			throw new IllegalStateException("Function Calling 未产生最终回答");
@@ -226,11 +205,6 @@ public class FunctionCallingService {
 			log.error("Function Calling 执行失败：{}", exception.getMessage(), exception);
 			throw new ApplicationException(HttpStatus.BAD_GATEWAY, "AI 工具调用失败，请稍后再试", exception);
 		}
-	}
-
-	private static MultiModalMessage toolMessage(ToolCallFunction call, String name, String content) {
-		return MultiModalMessage.builder().role("tool").toolCallId(call.getId())
-				.name(name).content(List.of(Map.of("text", content))).build();
 	}
 
 	private String toolFailureContent(String tool, String code, String message, boolean retryable) {
@@ -250,11 +224,6 @@ public class FunctionCallingService {
 		String message = exception.getMessage();
 		if (message == null || message.isBlank()) return "外部能力暂时不可用";
 		return message.length() > 300 ? message.substring(0, 300) + "…" : message;
-	}
-
-	private static MultiModalMessage message(String role, String content) {
-		return MultiModalMessage.builder().role(role)
-				.content(List.of(java.util.Map.of("text", content))).build();
 	}
 
 	static boolean requiresImageGeneration(String question, String context) {
@@ -302,12 +271,5 @@ public class FunctionCallingService {
 				+ String.valueOf(last.assistantMessage())).toLowerCase(java.util.Locale.ROOT);
 		return previous.contains("b站") || previous.contains("bilibili")
 				|| previous.contains("哔哩哔哩") || previous.contains("收藏夹");
-	}
-
-	private void configureEndpoint() {
-		if (baseUrl != null && !baseUrl.isBlank()) {
-			String endpoint = baseUrl.trim().replace("/compatible-mode/v1", "/api/v1");
-			Constants.baseHttpApiUrl = endpoint.endsWith("/") ? endpoint : endpoint + "/";
-		}
 	}
 }

@@ -54,8 +54,7 @@ public class TravelTaskType implements AgentTaskType {
 
 	@Override
 	public boolean autoStart(String requestContext) {
-		String value = requestContext == null ? "" : requestContext.toLowerCase(Locale.ROOT);
-		return supports(value) && containsAny(value, "h5", "链接", "跳转", "入口", "购票页", "购票页面");
+		return supports(requestContext);
 	}
 
 	@Override

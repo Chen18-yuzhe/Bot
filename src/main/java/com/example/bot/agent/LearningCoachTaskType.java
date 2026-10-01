@@ -17,6 +17,7 @@ public class LearningCoachTaskType implements AgentTaskType {
 	@Override public String name() { return NAME; }
 	@Override public int routingPriority() { return 60; }
 	@Override public Set<String> allowedTools() { return TOOLS; }
+	@Override public boolean autoStart(String requestContext) { return supports(requestContext); }
 	@Override public int maxSteps(int configuredDefault) { return Math.max(10, configuredDefault); }
 	@Override public long tokenBudget(long configuredDefault) { return Math.max(60_000, configuredDefault); }
 	@Override public Duration timeout(Duration configuredDefault) {

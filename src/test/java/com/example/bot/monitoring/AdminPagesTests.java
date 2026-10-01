@@ -14,6 +14,8 @@ class AdminPagesTests {
 		assertTrue(page.contains("adminToken=submittedToken"));
 		assertTrue(page.contains("headers['X-Admin-Token']=adminToken"));
 		assertTrue(page.contains("data-action=\"rename\""));
+		assertTrue(page.contains("data-page=\"usernames\""));
+		assertTrue(page.contains("设置永久称呼"));
 		assertTrue(page.contains("阅读历史内容时自动刷新不会打断你"));
 		assertTrue(page.contains("contextsRefreshTimer=window.setInterval"));
 		assertTrue(page.contains("slice().reverse().flatMap"));

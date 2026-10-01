@@ -3,7 +3,9 @@ package com.example.bot.tools;
 import org.springframework.stereotype.Component;
 
 import com.alibaba.dashscope.tools.FunctionDefinition;
+import com.example.bot.agent.AgentToolException;
 import com.example.bot.bilibili.BilibiliFavoritesService;
+import com.example.bot.bilibili.BilibiliQrLoginService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -21,7 +23,7 @@ public class BilibiliFavoritesTool implements AssistantTool {
 					""".trim())
 			.parameters(JsonParser.parseString("""
 					{"type":"object","properties":{
-					  "action":{"type":"string","enum":["status","list_folders","sync_folder","list_videos","get_subtitle","ingest_folder"],"description":"要执行的操作"},
+					  "action":{"type":"string","enum":["status","start_login","login_status","list_folders","sync_folder","list_videos","get_subtitle","get_danmaku","ingest_folder"],"description":"要执行的操作"},
 					  "folderId":{"type":"integer","minimum":1,"description":"收藏夹 ID；列视频、同步和导入时必填。必须先从 list_folders 的真实结果取得，禁止猜测"},
 					  "includeSubtitles":{"type":"boolean","description":"sync_folder 是否同时抓取字幕，默认 false"},
 					  "query":{"type":"string","maxLength":160,"description":"可选的视频标题、UP主、简介或字幕关键词；列出全部时不要传"},
@@ -31,10 +33,13 @@ public class BilibiliFavoritesTool implements AssistantTool {
 					""").getAsJsonObject()).build();
 
 	private final BilibiliFavoritesService favorites;
+	private final BilibiliQrLoginService qrLogin;
 	private final ObjectMapper objectMapper;
 
-	public BilibiliFavoritesTool(BilibiliFavoritesService favorites, ObjectMapper objectMapper) {
+	public BilibiliFavoritesTool(BilibiliFavoritesService favorites, BilibiliQrLoginService qrLogin,
+			ObjectMapper objectMapper) {
 		this.favorites = favorites;
+		this.qrLogin = qrLogin;
 		this.objectMapper = objectMapper;
 	}
 
@@ -44,25 +49,53 @@ public class BilibiliFavoritesTool implements AssistantTool {
 	public ToolResult execute(JsonNode arguments, ToolContext context) {
 		favorites.requireAuthorized(context.sessionId());
 		String action = arguments.path("action").asText("").trim();
+		if ("sync_folder".equals(action) || "list_videos".equals(action)
+				|| "ingest_folder".equals(action)) {
+			requiredFolderId(arguments);
+		}
+		if ("start_login".equals(action)) {
+			return startQrLogin(context);
+		}
+		if (!"status".equals(action) && !"login_status".equals(action)
+				&& !favorites.authenticated(context.sessionId())) {
+			startQrLogin(context);
+		}
 		Object result = switch (action) {
-			case "status" -> favorites.status();
-			case "list_folders" -> favorites.listFolders();
+			case "status" -> favorites.status(context.sessionId());
+			case "login_status" -> qrLogin.status(BilibiliFavoritesService.credentialId(context.sessionId()));
+			case "list_folders" -> favorites.listFolders(context.sessionId());
 			case "sync_folder" -> favorites.syncFolder(
-					requiredFolderId(arguments), arguments.path("includeSubtitles").asBoolean(false));
+					context.sessionId(), requiredFolderId(arguments),
+					arguments.path("includeSubtitles").asBoolean(false));
 			case "list_videos" -> favorites.listVideos(
-					requiredFolderId(arguments), arguments.path("query").asText(""),
+					context.sessionId(), requiredFolderId(arguments), arguments.path("query").asText(""),
 					arguments.path("limit").asInt(10));
 			case "get_subtitle" -> {
-				String subtitle = favorites.subtitle(arguments.path("bvId").asText(""));
+				String subtitle = favorites.subtitle(context.sessionId(), arguments.path("bvId").asText(""));
 				if (subtitle.isBlank()) yield new EmptySubtitle(arguments.path("bvId").asText(""));
 				yield new Subtitle(arguments.path("bvId").asText(""), subtitle);
 			}
+			case "get_danmaku" -> favorites.danmaku(context.sessionId(), arguments.path("bvId").asText(""));
 			case "ingest_folder" -> favorites.syncAndIngest(requiredFolderId(arguments), context.sessionId());
 			default -> throw new IllegalArgumentException("action 不支持：" + action);
 		};
 		String json = json(result);
 		if (result instanceof EmptySubtitle) return ToolResult.noResult(json);
 		return ToolResult.text(json);
+	}
+
+	/** Starts (or reuses) a QR attempt and deliberately yields the agent to the account owner. */
+	private ToolResult startQrLogin(ToolContext context) {
+		String credentialId = BilibiliFavoritesService.credentialId(context.sessionId());
+		BilibiliQrLoginService.LoginStatus status = qrLogin.start(credentialId);
+		if (status.state() == BilibiliQrLoginService.State.AUTHENTICATED) {
+			return ToolResult.text(json(status));
+		}
+		if (status.state() == BilibiliQrLoginService.State.WAITING_FOR_SCAN) {
+			throw AgentToolException.authRequired("Bilibili 登录等待扫码",
+					"Bilibili 官方登录二维码已生成。请在管理控制台的“Agent 任务”中打开当前任务，点击“B站扫码登录”并用该用户的 Bilibili App 确认；登录成功后恢复此任务，Agent 会从登录检查继续。二维码和凭据均不会发送到聊天内容。");
+		}
+		throw AgentToolException.authRequired("Bilibili 登录未完成", status.message());
 	}
 
 	private static long requiredFolderId(JsonNode arguments) {

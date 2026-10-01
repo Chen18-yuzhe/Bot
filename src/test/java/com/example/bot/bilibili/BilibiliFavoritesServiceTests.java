@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 
 import com.example.demo.model.BiliVideo;
 import com.example.demo.service.FavService;
-import com.example.bot.ApplicationException;
 import com.example.bot.knowledge.KnowledgeBaseService;
 
 class BilibiliFavoritesServiceTests {
@@ -22,24 +21,26 @@ class BilibiliFavoritesServiceTests {
 	private final BilibiliLiveApi liveApi = mock(BilibiliLiveApi.class);
 	private final KnowledgeBaseService knowledge = mock(KnowledgeBaseService.class);
 	private final BilibiliFavoritesService service = new BilibiliFavoritesService(
-			"SESSDATA=secret; DedeUserID=123", "account::owner", knowledge,
-			cookie -> sdk, liveApi);
+			knowledge, cookie -> sdk, liveApi);
 
 	@Test
-	void accessIsDeniedUnlessTheExactSessionIsAllowlisted() {
+	void everyNonBlankSessionCanUseItsOwnQrLoginButBlankSessionsAreRejected() {
 		assertThat(service.authorized("account::owner")).isTrue();
-		assertThat(service.authorized("account::other")).isFalse();
-		assertThatThrownBy(() -> service.requireAuthorized("account::other"))
-				.isInstanceOf(ApplicationException.class)
-				.hasMessageContaining("未获准");
+		assertThat(service.authorized("account::other")).isTrue();
+		assertThat(service.authorized("unlisted-default-user")).isTrue();
+		assertThat(service.authorized(" ")).isFalse();
+		assertThatThrownBy(() -> service.requireAuthorized(" "))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("会话无效");
 	}
 
 	@Test
 	void listsFoldersWithoutReturningTheCookie() throws Exception {
-		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+		login("default");
+		when(liveApi.listFolders("SESSDATA=qr; DedeUserID=123"))
 				.thenReturn(Map.of(2L, "稍后看", 1L, "Java"));
 
-		var folders = service.listFolders();
+		var folders = service.listFolders("default");
 
 		assertThat(folders).extracting(BilibiliFavoritesService.Folder::name)
 				.containsExactly("Java", "稍后看");
@@ -47,10 +48,33 @@ class BilibiliFavoritesServiceTests {
 	}
 
 	@Test
+	void qrCookieBelongsOnlyToTheExactConversation() throws Exception {
+		String project = "12345678-1234-1234-1234-123456789012";
+		assertThat(service.authenticated("default-user")).isFalse();
+		assertThat(service.authenticated(project + "::owner")).isFalse();
+
+		service.useRuntimeCookie(project + "::owner", "SESSDATA=project; DedeUserID=456");
+
+		assertThat(service.status("default-user").credentialSource()).isEqualTo("none");
+		assertThat(service.status(project + "::owner").credentialSource()).isEqualTo("qr-login");
+		assertThat(service.authenticated(project + "::owner")).isTrue();
+		assertThat(service.authenticated(project + "::other")).isFalse();
+	}
+
+	@Test
+	void qrCookieIsReportedAsTheOnlyCredentialSource() {
+		service.useRuntimeCookie("default", "SESSDATA=qr; DedeUserID=456");
+
+		assertThat(service.status("default").credentialSource()).isEqualTo("qr-login");
+		assertThat(service.authenticated("default")).isTrue();
+	}
+
+	@Test
 	void listsOnlyVideosReturnedByTheOwnedLiveFolder() throws Exception {
-		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+		login("default");
+		when(liveApi.listFolders("SESSDATA=qr; DedeUserID=123"))
 				.thenReturn(Map.of(8L, "默认收藏夹"));
-		when(liveApi.listFolderVideos("SESSDATA=secret; DedeUserID=123", 8L))
+		when(liveApi.listFolderVideos("SESSDATA=qr; DedeUserID=123", 8L))
 				.thenReturn(List.of(new BilibiliLiveApi.LiveVideo(
 						"BV1234567890", "Spring Agent", "description", "张三", 120, 8L)));
 		when(sdk.getSubtitleText("BV1234567890")).thenReturn("这里讲解 Function Calling");
@@ -64,7 +88,8 @@ class BilibiliFavoritesServiceTests {
 
 	@Test
 	void rejectsFolderIdsThatDoNotBelongToTheCurrentCookie() throws Exception {
-		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+		login("default");
+		when(liveApi.listFolders("SESSDATA=qr; DedeUserID=123"))
 				.thenReturn(Map.of(8L, "默认收藏夹"));
 
 		assertThatThrownBy(() -> service.listVideos(999L, "", 10))
@@ -72,11 +97,24 @@ class BilibiliFavoritesServiceTests {
 	}
 
 	@Test
+	void readsDanmakuUsingOnlyTheCurrentSessionsQrCredential() throws Exception {
+		login("owner");
+		when(liveApi.danmaku("SESSDATA=qr; DedeUserID=123", "BV1234567890"))
+				.thenReturn(new BilibiliLiveApi.DanmakuSnapshot("BV1234567890", 2, List.of("好课")));
+
+		var result = service.danmaku("owner", "BV1234567890");
+
+		assertThat(result.samples()).containsExactly("好课");
+		verify(liveApi).danmaku("SESSDATA=qr; DedeUserID=123", "BV1234567890");
+	}
+
+	@Test
 	void syncsSubtitlesAndUpsertsKnowledgeDocuments() throws Exception {
 		BiliVideo video = video("BV1234567890", "Java 教程", "张三", 8L);
-		when(liveApi.listFolders("SESSDATA=secret; DedeUserID=123"))
+		login("owner");
+		when(liveApi.listFolders("SESSDATA=qr; DedeUserID=123"))
 				.thenReturn(Map.of(8L, "默认收藏夹"));
-		when(liveApi.listFolderVideos("SESSDATA=secret; DedeUserID=123", 8L))
+		when(liveApi.listFolderVideos("SESSDATA=qr; DedeUserID=123", 8L))
 				.thenReturn(List.of(new BilibiliLiveApi.LiveVideo(
 						"BV1234567890", "Java 教程", "description", "张三", 120, 8L)));
 		when(sdk.fetchFavWithSubtitle(8L)).thenReturn(1);
@@ -84,11 +122,11 @@ class BilibiliFavoritesServiceTests {
 		when(sdk.listAllVideos()).thenReturn(List.of(video));
 		when(sdk.getSubtitleText("BV1234567890")).thenReturn("字幕正文");
 
-		var result = service.syncAndIngest(8L, "account::owner");
+		var result = service.syncAndIngest(8L, "owner");
 
 		assertThat(result.importedKnowledgeDocuments()).isEqualTo(1);
 		verify(knowledge).upsertForSession(
-				org.mockito.ArgumentMatchers.eq("account::owner"),
+				org.mockito.ArgumentMatchers.eq("owner"),
 				org.mockito.ArgumentMatchers.eq("bilibili-BV1234567890.md"),
 				org.mockito.ArgumentMatchers.contains("字幕正文"));
 	}
@@ -103,5 +141,9 @@ class BilibiliFavoritesServiceTests {
 		video.setFavId(folderId);
 		video.setFetchedAt(LocalDateTime.now());
 		return video;
+	}
+
+	private void login(String sessionId) {
+		service.useRuntimeCookie(sessionId, "SESSDATA=qr; DedeUserID=123");
 	}
 }

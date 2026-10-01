@@ -18,9 +18,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.alibaba.dashscope.common.MultiModalMessage;
-import com.alibaba.dashscope.tools.ToolBase;
-import com.alibaba.dashscope.tools.ToolCallFunction;
+import com.example.bot.model.ChatMessage;
+import com.example.bot.model.ChatModel;
+import com.example.bot.model.ChatRequest;
+import com.example.bot.model.ChatResponse;
+import com.example.bot.model.ToolCall;
+import com.example.bot.model.ToolDefinition;
 import com.example.bot.tools.AssistantToolRegistry;
 
 /**
@@ -37,7 +40,7 @@ public class AgentLoopService {
 
 	private final AgentTaskStore store;
 	private final AgentTraceRecorder trace;
-	private final AgentModelClient model;
+	private final ChatModel model;
 	private final AgentToolExecutor tools;
 	private final ErrorClassifier errorClassifier;
 	private final AssistantToolRegistry registry;
@@ -51,7 +54,7 @@ public class AgentLoopService {
 	private final RecoveryPolicy defaultRecovery;
 	private final int modelRecoveryMaxAttempts;
 
-	public AgentLoopService(AgentTaskStore store, AgentTraceRecorder trace, AgentModelClient model,
+	public AgentLoopService(AgentTaskStore store, AgentTraceRecorder trace, ChatModel model,
 			AgentToolExecutor tools, ErrorClassifier errorClassifier, AssistantToolRegistry registry, List<AgentTaskType> registeredTaskTypes,
 			@Value("${assistant.agent.default-max-steps:12}") int defaultMaxSteps,
 			@Value("${assistant.agent.default-token-budget:12000}") long defaultTokenBudget,
@@ -88,6 +91,11 @@ public class AgentLoopService {
 		AgentTask task = new AgentTask();
 		task.setId(UUID.randomUUID().toString());
 		task.setSessionId(sessionId.trim());
+		int projectSeparator = task.getSessionId().indexOf("::");
+		task.setProjectId(projectSeparator > 0
+				? task.getSessionId().substring(0, projectSeparator) : "default");
+		task.setUserId(projectSeparator > 0
+				? task.getSessionId().substring(projectSeparator + 2) : task.getSessionId());
 		task.setTaskType(type.name());
 		task.setGoal(goal.trim());
 		task.setCreatedAtMs(now);
@@ -266,7 +274,7 @@ public class AgentLoopService {
 					if (handleModelFailure(task, step, modelOutcome)) return;
 					continue;
 				}
-				AgentModelClient.AgentModelTurn turn = modelOutcome.turn();
+				ChatResponse turn = modelOutcome.turn();
 				synchronized (task) {
 					task.setTokensUsed(task.getTokensUsed() + Math.max(0, turn.totalTokens()));
 					task.getTranscript().add(AgentTranscript.Entry.assistant(turn.text(), toRecords(turn.toolCalls())));
@@ -309,15 +317,15 @@ public class AgentLoopService {
 				if (task.getTokensUsed() >= task.getTokenBudget()) {
 					fail(task, TerminationReason.TOKEN_BUDGET_EXHAUSTED, "已达到 token 预算"); return;
 				}
-				for (ToolCallFunction call : turn.toolCalls()) {
+				for (ToolCall call : turn.toolCalls()) {
 					if (stopAtBoundary(task)) return;
-					String name = call.getFunction().getName();
+					String name = call.name();
 					if (!isAllowed(type, name)) {
 						observe(task, step, call, failureJson(name, ErrorKind.PERMISSION_DENIED, "该任务类型不允许调用此工具", false));
 						continue;
 					}
 					record(task, step, AgentTraceEvent.Phase.ACT, "TOOL_CALL", "调用工具: " + name, null);
-					AgentToolExecutor.ToolOutcome outcome = executeWithRetry(name, call.getFunction().getArguments(), task, type);
+					AgentToolExecutor.ToolOutcome outcome = executeWithRetry(name, call.argumentsJson(), task, type);
 					boolean handedOff = !outcome.success() && handoffOrObserve(task, type, step, call, name, outcome);
 					String content = outcome.success() ? outcome.content()
 							: outcome.hasDegradedContent() ? degradedJson(name, outcome.degradedContent())
@@ -340,7 +348,8 @@ public class AgentLoopService {
 		ErrorKind lastKind = ErrorKind.UNKNOWN;
 		for (int attempt = 1; attempt <= policy.transientMaxAttempts(); attempt++) {
 			try {
-				return ModelCallOutcome.success(model.call(messages(type, task), allowedToolDefinitions(type), MODEL_MAX_TOKENS));
+				return ModelCallOutcome.success(model.chat(new ChatRequest(messages(type, task),
+						allowedToolDefinitions(type), MODEL_MAX_TOKENS, ChatRequest.ToolChoice.auto())));
 			} catch (Exception error) {
 				lastError = error;
 				lastKind = errorClassifier.classify(error);
@@ -406,8 +415,8 @@ public class AgentLoopService {
 				"工具失败，已要求模型诊断并验证后续方案", "tool=" + tool + ", kind=" + outcome.errorKind());
 	}
 
-	private record ModelCallOutcome(AgentModelClient.AgentModelTurn turn, ErrorKind errorKind, Exception error) {
-		static ModelCallOutcome success(AgentModelClient.AgentModelTurn turn) {
+	private record ModelCallOutcome(ChatResponse turn, ErrorKind errorKind, Exception error) {
+		static ModelCallOutcome success(ChatResponse turn) {
 			return new ModelCallOutcome(turn, null, null);
 		}
 		static ModelCallOutcome failure(ErrorKind errorKind, Exception error) {
@@ -429,7 +438,7 @@ public class AgentLoopService {
 		return outcome;
 	}
 
-	private boolean handoffOrObserve(AgentTask task, AgentTaskType type, int step, ToolCallFunction call,
+	private boolean handoffOrObserve(AgentTask task, AgentTaskType type, int step, ToolCall call,
 			String name, AgentToolExecutor.ToolOutcome outcome) {
 		RecoveryPolicy policy = type.recoveryPolicy(defaultRecovery);
 		if (outcome.hasDegradedContent() && policy.allowDegrade()) {
@@ -515,20 +524,18 @@ public class AgentLoopService {
 		record(task, task.getStepCount(), AgentTraceEvent.Phase.TERMINATE, reason.name(), "任务终止", summary);
 	}
 
-	private List<Object> messages(AgentTaskType type, AgentTask task) {
-		List<Object> messages = new ArrayList<>();
-		messages.add(MultiModalMessage.builder().role("system")
-				.content(List.of(Map.of("text", type.systemPrompt(task)))).build());
+	private List<ChatMessage> messages(AgentTaskType type, AgentTask task) {
+		List<ChatMessage> messages = new ArrayList<>();
+		messages.add(ChatMessage.system(type.systemPrompt(task)));
 		String budgetConstraint = "Task constraint: remaining steps=" + Math.max(0, task.getMaxSteps() - task.getStepCount())
 				+ ", remaining token budget=" + Math.max(0, task.getTokenBudget() - task.getTokensUsed())
 				+ ". If the goal is complete, return the final report without another tool call.";
-		messages.add(MultiModalMessage.builder().role("system")
-				.content(List.of(Map.of("text", budgetConstraint))).build());
-		messages.addAll(AgentTranscript.toSdkMessages(task.getTranscript()));
+		messages.add(ChatMessage.system(budgetConstraint));
+		messages.addAll(AgentTranscript.toChatMessages(task.getTranscript()));
 		return messages;
 	}
 
-	private List<ToolBase> allowedToolDefinitions(AgentTaskType type) {
+	private List<ToolDefinition> allowedToolDefinitions(AgentTaskType type) {
 		Set<String> allowed = type.allowedTools();
 		if (allowed == null || allowed.isEmpty()) return registry.definitions();
 		return allowed.stream().sorted().map(registry::definition).toList();
@@ -537,13 +544,13 @@ public class AgentLoopService {
 		Set<String> allowed = type.allowedTools(); return allowed == null || allowed.isEmpty() || allowed.contains(toolName);
 	}
 	private static boolean isMonitorTriggered(String text) { return text != null && text.trim().toUpperCase().startsWith("TRIGGERED"); }
-	private static List<AgentTranscript.ToolCallRecord> toRecords(Collection<ToolCallFunction> calls) {
-		return calls.stream().map(call -> new AgentTranscript.ToolCallRecord(call.getId(), call.getFunction().getName(),
-				call.getFunction().getArguments())).toList();
+	private static List<AgentTranscript.ToolCallRecord> toRecords(Collection<ToolCall> calls) {
+		return calls.stream().map(call -> new AgentTranscript.ToolCallRecord(call.id(), call.name(),
+				call.argumentsJson())).toList();
 	}
-	private void observe(AgentTask task, int step, ToolCallFunction call, String content) {
-		synchronized (task) { task.getTranscript().add(AgentTranscript.Entry.tool(call.getId(), call.getFunction().getName(), content)); compact(task); store.save(task); }
-		record(task, step, AgentTraceEvent.Phase.OBSERVE, "TOOL_RESULT", "已观察工具结果: " + call.getFunction().getName(), null);
+	private void observe(AgentTask task, int step, ToolCall call, String content) {
+		synchronized (task) { task.getTranscript().add(AgentTranscript.Entry.tool(call.id(), call.name(), content)); compact(task); store.save(task); }
+		record(task, step, AgentTraceEvent.Phase.OBSERVE, "TOOL_RESULT", "已观察工具结果: " + call.name(), null);
 	}
 	private static String failureJson(String tool, ErrorKind kind, String message, boolean retryable) {
 		return "{\"success\":false,\"tool\":\"" + escape(tool) + "\",\"errorKind\":\"" + kind

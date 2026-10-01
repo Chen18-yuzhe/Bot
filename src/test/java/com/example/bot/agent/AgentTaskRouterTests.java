@@ -15,7 +15,8 @@ import com.example.bot.chat.ConversationTurn;
 class AgentTaskRouterTests {
 	private final AgentTaskRouter router = new AgentTaskRouter(List.of(
 			new GenericTaskType(), new DecisionTaskType(), new LearningCoachTaskType(),
-			new DeepResearchTaskType(), new TravelTaskType(), new BilibiliFavoritesTaskType()));
+			new DeepResearchTaskType(), new TravelTaskType(), new BilibiliFavoritesTaskType(),
+			new HealthLifestylePlanTaskType()));
 
 	@Test
 	void discoversAndRoutesSpecializedTaskTypesWithoutCentralBranches() {
@@ -25,6 +26,9 @@ class AgentTaskRouterTests {
 		assertEquals(DecisionTaskType.NAME, router.route("帮我做 PostgreSQL 和 MySQL 技术选型", List.of()).name());
 		assertEquals(BilibiliFavoritesTaskType.NAME,
 				router.route("列出我的B站收藏夹", List.of()).name());
+		assertEquals(HealthLifestylePlanTaskType.NAME,
+				router.route("我有高血压，按我的作息制定饮食和运动计划", List.of()).name());
+		assertTrue(router.shouldAutoStart("我有高血压，按我的作息制定饮食和运动计划", List.of()));
 		assertEquals(GenericTaskType.NAME, router.route("帮我算一道题", List.of()).name());
 	}
 
@@ -34,7 +38,7 @@ class AgentTaskRouterTests {
 				new ConversationTurn("帮我做杭州攻略", "这里有三个方案"));
 		assertEquals(TravelTaskType.NAME, router.route("第二个呢", history).name());
 		assertTrue(router.shouldAutoStart("给我故宫门票 H5 链接", List.of()));
-		assertFalse(router.shouldAutoStart("做一份 AI 行业研究报告", List.of()));
+		assertTrue(router.shouldAutoStart("做一份 AI 行业研究报告", List.of()));
 	}
 
 	@Test
@@ -43,9 +47,23 @@ class AgentTaskRouterTests {
 				new ConversationTurn("给我故宫门票 H5 链接",
 						"美团入口：https://www.meituan.com/"));
 
-		assertFalse(router.shouldAutoStart("列出我的B站收藏夹", history));
+		assertTrue(router.shouldAutoStart("列出我的B站收藏夹", history));
 		assertEquals(BilibiliFavoritesTaskType.NAME,
 				router.route("列出我的B站收藏夹", history).name());
+	}
+
+	@Test
+	void ambiguousFollowUpUsesOnlyTheImmediatelyPreviousTopic() {
+		List<ConversationTurn> latestTravel = List.of(
+				new ConversationTurn("列出我的B站收藏夹", "当前有一个默认收藏夹。"),
+				new ConversationTurn("给我三个杭州方案", "第一种是杭州自然历史方案，包含西湖景点和交通安排。"));
+		assertEquals(TravelTaskType.NAME, router.route("第一个", latestTravel).name());
+
+		List<ConversationTurn> latestBilibili = List.of(
+				new ConversationTurn("给我三个杭州方案", "第一种是杭州自然历史方案，包含西湖景点。"),
+				new ConversationTurn("列出我的B站收藏夹", "当前有一个默认收藏夹。"));
+		assertEquals(BilibiliFavoritesTaskType.NAME,
+				router.route("第一个", latestBilibili).name());
 	}
 
 	@ParameterizedTest(name = "{0} -> {1}")

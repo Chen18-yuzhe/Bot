@@ -44,6 +44,10 @@ $env:QWEATHER_API_KEY="your-key"
 .\mvnw.cmd spring-boot:run
 ```
 
+The default model provider is DashScope. For a local no-key smoke test, set
+`APP_MODEL_PROVIDER=mock`; application and Agent Loop calls then use the built-in
+mock provider instead of making external model requests.
+
 健康检查：
 
 ```powershell
@@ -86,14 +90,14 @@ docker compose up --build
 
 | 环境变量 | 用途 | 必需 |
 | --- | --- | --- |
+| `APP_MODEL_PROVIDER` | Chat model provider (`dashscope` by default; `mock` for no-key local smoke tests) | No |
 | `DASHSCOPE_API_KEY` | 大模型、多模态与联网搜索 | 核心对话必需 |
 | `QWEATHER_API_HOST` / `QWEATHER_API_KEY` | 实时天气 | 天气功能必需 |
 | `REDIS_URL` | Agent 调度、提醒与缓存 | 否，可降级 |
 | `ADMIN_API_TOKEN` | 私有管理台认证 | 生产建议设置 |
-| `BILI_COOKIE` | Bilibili 登录 Cookie，只从环境读取 | 否，也可扫码登录 |
-| `BILI_ALLOWED_SESSION_IDS` | 可访问私人收藏夹的完整会话 ID，逗号分隔 | 启用 B 站工具时必需 |
 | `ILINK_CREDENTIALS_FILE` | 微信 iLink 会话文件 | 微信接入必需 |
 | `TRAVEL_SUPPLIER_API_URL` / `TRAVEL_SUPPLIER_API_KEY` | 真实票务供应商结算适配 | 真实票务必需 |
+| `TRAVEL_RAIL_MCP_ENABLED` | 启用只读第三方 12306 MCP 查询 | 否，默认 `false` |
 
 完整配置参见 [项目详细介绍](PROJECT-INTRODUCTION.md) 与 [技术文档](TECHNICAL-DOCUMENTATION.md)。
 
@@ -107,21 +111,18 @@ docker compose up --build
 - 将某个收藏夹的字幕幂等写入账号隔离知识库；
 - 聊天命中收藏内容时提示“您的收藏夹中有对应的视频讲解”。
 
-最简单的登录方式是在服务器环境中设置 `BILI_COOKIE`。Cookie 不应写进
-`application.properties`、`.env.example` 或 Git。必须同时设置精确会话白名单，例如：
+用户首次询问 B 站收藏夹时，Agent 会调用 Bilibili 官方二维码登录流程，并在管理控制台的对应 Agent
+任务中展示二维码。登录凭据只保留在当前 Java 进程的内存中，严格绑定到该用户会话；重启后需重新扫码，
+且绝不写入聊天、`application.properties`、`.env.example` 或 Git，也不会被其他用户或机器人项目复用。
+当登录信息缺失时任务会进入 `WAITING_HUMAN`，扫码后恢复并从登录检查继续；空收藏夹、无匹配视频或无字幕
+会如实结束。对于有字幕的视频，Agent 会基于字幕返回内容总结和要点，不会补造未出现在字幕中的信息。
 
-```dotenv
-BILI_COOKIE=SESSDATA=...; bili_jct=...; DedeUserID=...
-BILI_ALLOWED_SESSION_IDS=account-id::user-id
-```
-
-也可以使用管理接口扫码登录，Cookie 只保存在当前 Java 进程内存中，重启后失效：
+也可以直接使用管理接口为一个等待登录的 Bilibili Agent 任务生成二维码：
 
 ```powershell
 $headers = @{ "X-Admin-Token" = $env:ADMIN_API_TOKEN }
-Invoke-RestMethod -Method Post -Headers $headers http://127.0.0.1:8080/api/admin/bilibili/login
-Invoke-WebRequest -Headers $headers http://127.0.0.1:8080/api/admin/bilibili/qrcode.svg -OutFile bili-login.svg
-Invoke-RestMethod -Headers $headers http://127.0.0.1:8080/api/admin/bilibili/status
+Invoke-RestMethod -Method Post -Headers $headers 'http://127.0.0.1:8080/api/admin/bilibili/task-login?taskId=<任务ID>'
+Invoke-WebRequest -Headers $headers 'http://127.0.0.1:8080/api/admin/bilibili/task-qrcode.svg?taskId=<任务ID>' -OutFile bili-login.svg
 ```
 
 上述管理接口仍受“仅本机/SSH 隧道访问”和 `ADMIN_API_TOKEN` 双重保护。
@@ -132,6 +133,7 @@ SDK 制品来源与重建方式见 [vendor 说明](vendor/README.md)。
 - 当前 RAG 使用可解释的词项相关性检索，不是向量数据库。
 - HTTP `/api/chat` 是测试入口，不应直接作为正式多租户 API。
 - 旅游模块内置行程演示目录；实时 POI、路况、库存与支付需要配置对应供应商。
+- 铁路查询可选接入第三方 `12306-mcp@0.3.9`。它不是 12306 官方服务，仅用于只读余票查询；需 Node.js 18+，设置 `TRAVEL_RAIL_MCP_ENABLED=true` 后由 `npx` 启动。实名、下单、支付仍只在铁路 12306 官方页面完成。
 - 管理台默认仅允许服务器本机或 SSH 隧道访问。
 
 ## 文档

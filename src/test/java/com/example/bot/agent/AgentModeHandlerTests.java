@@ -10,11 +10,40 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
+
+import com.example.bot.ilink.UserNameService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import com.example.bot.chat.ConversationMemory;
 import com.example.bot.chat.ConversationTurn;
 
 class AgentModeHandlerTests {
+	@TempDir Path temporaryDirectory;
+
+	@Test
+	void healthPlanAutomaticallyIncludesPersistedHealthAndRoutineConstraints() {
+		AgentLoopService loop = mock(AgentLoopService.class);
+		AgentTask task = new AgentTask();
+		task.setId("health-plan-task");
+		when(loop.submit(eq("wx-user"), eq(HealthLifestylePlanTaskType.NAME), any(), any())).thenReturn(task);
+		UserNameService profiles = new UserNameService(new ObjectMapper(),
+				temporaryDirectory.resolve("credentials.json").toString());
+		profiles.updateMemory("wx-user", "health.高血压", "用户明确自述有高血压");
+		profiles.updateMemory("wx-user", "constraint.作息", "通常 00:30 入睡，07:00 起床，工作日久坐");
+		AgentTaskRouter router = new AgentTaskRouter(java.util.List.of(
+				new GenericTaskType(), new HealthLifestylePlanTaskType()));
+		AgentModeHandler handler = new AgentModeHandler(loop, mock(ConversationMemory.class), router, profiles);
+
+		handler.handle("wx-user", "帮我制定饮食和运动计划");
+
+		verify(loop).submit(eq("wx-user"), eq(HealthLifestylePlanTaskType.NAME),
+				org.mockito.ArgumentMatchers.argThat(goal -> goal.contains("health.高血压")
+						&& goal.contains("constraint.作息")), any());
+	}
+
 	@Test
 	void agentModeSubmitsPlainMessagesAsTasks() {
 		AgentLoopService loop = mock(AgentLoopService.class);
@@ -26,7 +55,7 @@ class AgentModeHandlerTests {
 		assertTrue(handler.handle("wx-user", "/agent-mode").contains("Agent 模式"));
 		String reply = handler.handle("wx-user", "帮我比较三家酒店");
 
-		assertEquals("⌁ 正在分析目标…", reply);
+		assertEquals("任务已受理，可在控制台「Agent 任务」查看进度。", reply);
 		assertTrue(!reply.contains("#12345678"));
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), eq("帮我比较三家酒店"), any());
 	}
@@ -43,7 +72,7 @@ class AgentModeHandlerTests {
 		assertTrue(handler.handle("wx-user", "/agent").contains("Agent 模式"));
 		String reply = handler.handle("wx-user", "8月10日去杭州玩2天，2个人，预算2000元，给我几种方案");
 
-		assertEquals("⌁ 正在分析目标…", reply);
+		assertEquals("任务已受理，可在控制台「Agent 任务」查看进度。", reply);
 		assertTrue(!reply.contains("任务 #"));
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), any(), any());
 	}
@@ -58,7 +87,7 @@ class AgentModeHandlerTests {
 
 		String reply = handler.handle("wx-user", "/agent\n8月10日从上海去杭州玩2天，2个人，预算2000元，给我三种方案");
 
-		assertEquals("⌁ 正在分析目标…", reply);
+		assertEquals("任务已受理，可在控制台「Agent 任务」查看进度。", reply);
 		assertEquals(AgentModeHandler.Mode.AGENT, handler.modeOf("wx-user"));
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), any(), any());
 	}
@@ -84,7 +113,7 @@ class AgentModeHandlerTests {
 
 		String reply = handler.handle("wx-user", "帮我找灵隐飞来峰门票 H5 链接");
 
-		assertEquals("⌁ 正在分析目标…", reply);
+		assertEquals("任务已受理，可在控制台「Agent 任务」查看进度。", reply);
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME),
 				eq("帮我找灵隐飞来峰门票 H5 链接"), any());
 	}
@@ -125,6 +154,26 @@ class AgentModeHandlerTests {
 	}
 
 	@Test
+	void shortTravelChoiceDoesNotInheritOlderBilibiliTopic() {
+		AgentLoopService loop = mock(AgentLoopService.class);
+		ConversationMemory memory = mock(ConversationMemory.class);
+		when(memory.history("wx-user")).thenReturn(java.util.List.of(
+				new ConversationTurn("列出我的B站收藏夹", "当前有一个默认收藏夹。"),
+				new ConversationTurn("给我三个杭州方案", "第一种是杭州自然历史方案，包含西湖景点和交通安排。")));
+		AgentTask task = new AgentTask();
+		task.setId("travel-follow-up");
+		when(loop.submit(eq("wx-user"), eq(TravelTaskType.NAME), any(), any())).thenReturn(task);
+		AgentModeHandler handler = new AgentModeHandler(loop, memory);
+		handler.handle("wx-user", "/agent");
+
+		handler.handle("wx-user", "第一个");
+
+		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME),
+				org.mockito.ArgumentMatchers.argThat(goal -> goal.contains("杭州")
+						&& !goal.contains("B站") && !goal.contains("收藏夹")), any());
+	}
+
+	@Test
 	void standaloneTravelGoalDoesNotInheritStaleTicketAnswers() {
 		AgentLoopService loop = mock(AgentLoopService.class);
 		ConversationMemory memory = mock(ConversationMemory.class);
@@ -142,6 +191,25 @@ class AgentModeHandlerTests {
 		handler.handle("wx-user", goal);
 
 		verify(loop).submit(eq("wx-user"), eq(TravelTaskType.NAME), eq(goal), any());
+	}
+
+	@Test
+	void standaloneAgentGoalDoesNotInheritACompletedPreviousTask() {
+		AgentLoopService loop = mock(AgentLoopService.class);
+		ConversationMemory memory = mock(ConversationMemory.class);
+		when(memory.history("wx-user")).thenReturn(java.util.List.of(
+				new ConversationTurn("整理上周销售数据", "已完成销售周报。")));
+		AgentTask task = new AgentTask();
+		task.setId("fresh-task");
+		when(loop.submit(eq("wx-user"), eq(GenericTaskType.NAME),
+				eq("写一封项目延期通知"), any())).thenReturn(task);
+		AgentModeHandler handler = new AgentModeHandler(loop, memory);
+		handler.handle("wx-user", "/agent");
+
+		handler.handle("wx-user", "写一封项目延期通知");
+
+		verify(loop).submit(eq("wx-user"), eq(GenericTaskType.NAME),
+				eq("写一封项目延期通知"), any());
 	}
 
 	@Test

@@ -40,4 +40,18 @@ public final class ConversationContextPolicy {
 				? "" : last.assistantMessage().toLowerCase(Locale.ROOT);
 		return UNFINISHED_REPLY.matcher(previousAnswer).matches() ? List.of() : history;
 	}
+
+	/** Agent goals inherit history only for an explicit follow-up. */
+	public static List<ConversationTurn> explicitFollowUpHistory(
+			String question, List<ConversationTurn> history) {
+		if (history == null || history.isEmpty()) return List.of();
+		String current = question == null ? "" : question.trim();
+		if (current.isEmpty() || EXPLICIT_NEW_TOPIC.matcher(current).matches()) return List.of();
+		// Short references such as “第一个/这个/继续” point to the immediately
+		// preceding exchange. Passing several older topics into a capability
+		// router lets a high-priority stale task (for example Bilibili) hijack a
+		// newer travel follow-up.
+		return EXPLICIT_FOLLOW_UP.matcher(current).matches()
+				? List.of(history.get(history.size() - 1)) : List.of();
+	}
 }

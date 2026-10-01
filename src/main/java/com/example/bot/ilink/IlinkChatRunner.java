@@ -13,6 +13,8 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.UUID;
 import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +30,7 @@ import com.example.bot.chat.AssistantReply;
 import com.example.bot.chat.ImageReplyPolicy;
 import com.example.bot.chat.MediaContent;
 import com.example.bot.chat.MediaContent.MediaType;
+import com.example.bot.bilibili.BilibiliQrLoginService;
 import com.example.bot.audio.GeneratedAudio;
 import com.example.bot.audio.VoicePreferenceService;
 import com.example.bot.ApplicationException;
@@ -52,6 +55,11 @@ public class IlinkChatRunner {
 	private static final Logger log = LoggerFactory.getLogger(IlinkChatRunner.class);
 	private static final int MAX_SEEN_MESSAGE_IDS = 500;
 	private static final String SESSION_SEPARATOR = "::";
+	private static final Pattern LATEX_EXPRESSION = Pattern.compile(
+			"(?s)(?<!\\\\)\\$([^$\\r\\n]{1,500})\\$|\\\\\\((.{1,500}?)\\\\\\)|\\\\\\[(.{1,500}?)\\\\\\]");
+	private static final Pattern LATEX_FRACTION = Pattern.compile("\\\\frac\\{([^{}]{1,100})}\\{([^{}]{1,100})}");
+	private static final Pattern LATEX_SQRT = Pattern.compile("\\\\sqrt\\{([^{}]{1,160})}");
+	private static final Pattern LATEX_TEXT = Pattern.compile("\\\\(?:text|mathrm|mathbf|operatorname)\\{([^{}]{1,200})}");
 	private static final String RESET_REPLY = "已清除本次对话记忆，我们可以重新开始。";
 	private final AssistantService assistantService;
 	private final IlinkSessionStore sessionStore;
@@ -59,8 +67,12 @@ public class IlinkChatRunner {
 	private final AgentModeHandler agentModeHandler;
 	private final ReminderService reminderService;
 	private final VoicePreferenceService voicePreferenceService;
+	private final IlinkAccountProfileStore accountProfiles;
+	private final UserNameService userNameService;
 	private final UserRateLimiter rateLimiter;
 	private final ConversationAuditService auditService;
+	private final BilibiliQrLoginService bilibiliLogin;
+	private final QrCodeSvgService qrCodes;
 	private final long minReplyDelayMs;
 	private final long maxReplyDelayMs;
 	private final int maxReplyChars;
@@ -94,7 +106,10 @@ public class IlinkChatRunner {
 			WechatCommandHandler commandHandler, AgentModeHandler agentModeHandler,
 			ReminderService reminderService,
 			VoicePreferenceService voicePreferenceService,
+			IlinkAccountProfileStore accountProfiles,
+			UserNameService userNameService,
 			UserRateLimiter rateLimiter, ConversationAuditService auditService,
+			BilibiliQrLoginService bilibiliLogin, QrCodeSvgService qrCodes,
 			@Value("${assistant.ilink.min-reply-delay-ms:13000}") long minReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-delay-ms:17000}") long maxReplyDelayMs,
 			@Value("${assistant.ilink.max-reply-chars:1800}") int maxReplyChars,
@@ -109,8 +124,12 @@ public class IlinkChatRunner {
 		this.agentModeHandler = agentModeHandler;
 		this.reminderService = reminderService;
 		this.voicePreferenceService = voicePreferenceService;
+		this.accountProfiles = accountProfiles;
+		this.userNameService = userNameService;
 		this.rateLimiter = rateLimiter;
 		this.auditService = auditService;
+		this.bilibiliLogin = bilibiliLogin;
+		this.qrCodes = qrCodes;
 		this.minReplyDelayMs = Math.max(0, minReplyDelayMs);
 		this.maxReplyDelayMs = Math.max(this.minReplyDelayMs, maxReplyDelayMs);
 		this.maxReplyChars = Math.max(100, maxReplyChars);
@@ -126,6 +145,7 @@ public class IlinkChatRunner {
 	public void start() {
 		reminderService.setNotifier(this::deliverReminder);
 		agentModeHandler.setCompletionNotifier((sessionId, text) -> pushText(sessionId, text));
+		agentModeHandler.setLoginNotifier(this::deliverBilibiliLoginQr);
 		Map<String, ResumeContext> saved = sessionStore.loadAll();
 		if (saved.isEmpty()) {
 			startAccount("default", null, true);
@@ -137,12 +157,15 @@ public class IlinkChatRunner {
 	@PreDestroy
 	public void stop() {
 		reminderService.setNotifier(null);
+		agentModeHandler.setLoginNotifier(null);
 		batchExecutor.shutdownNow();
 		new ArrayList<>(accounts.values()).forEach(this::closeAccount);
 	}
 
 	private void startAccount(String accountId, ResumeContext resumeContext, boolean printQr) {
 		AccountRuntime runtime = new AccountRuntime(accountId, resumeContext, printQr);
+		String displayName = accountProfiles.displayName(accountId);
+		runtime.displayName = displayName.isBlank() ? null : displayName;
 		AccountRuntime previous = accounts.putIfAbsent(accountId, runtime);
 		if (previous != null) {
 			throw new IllegalStateException("iLink 账户已存在：" + accountId);
@@ -247,7 +270,9 @@ public class IlinkChatRunner {
 			MediaExtraction extraction = extractMedia(runtime.client, message);
 			List<MediaContent> media = extraction.media();
 			if (extraction.mediaItemFound() && media.isEmpty() && extraction.failed()) {
-				sendMediaFailureReply(runtime.client, message.getFrom_user_id());
+				sendMediaFailureReply(runtime.client,
+						sessionId(runtime.accountId, message.getFrom_user_id()),
+						message.getFrom_user_id());
 				continue;
 			}
 			if ((text == null || text.isBlank()) && media.isEmpty()) {
@@ -332,7 +357,7 @@ public class IlinkChatRunner {
 			previous.cancel(false);
 		}
 		if (receiptReply != null) {
-			sendReceiptReply(runtime.client, peerUserId, receiptReply);
+			sendReceiptReply(runtime.client, sessionId, peerUserId, receiptReply);
 		}
 		log.info("已暂存用户消息，等待 {} 毫秒收集同一轮文本和媒体：用户={}，本批媒体总数={}，已有文字={}",
 				flushDelayMs, sessionId, totalMedia, hasText);
@@ -407,9 +432,9 @@ public class IlinkChatRunner {
 		}
 	}
 
-	private void sendReceiptReply(ILinkClient client, String userId, String reply) {
+	private void sendReceiptReply(ILinkClient client, String sessionId, String userId, String reply) {
 		try {
-			client.sendText(userId, reply);
+			sendTextParts(client, userId, namedReply(sessionId, reply));
 			log.info("已发送附件接收提示：用户={}", userId);
 		} catch (IOException | RuntimeException exception) {
 			log.warn("附件接收提示发送失败，仍将继续处理附件：用户={}，原因={}", userId, exception.getMessage());
@@ -491,8 +516,11 @@ public class IlinkChatRunner {
 			GeneratedDocument generatedDocument = null;
 			GeneratedAudio generatedAudio = null;
 			AssistantReply assistantReply = null;
-			String commandReply = media.isEmpty() ? commandHandler.handle(question) : null;
+			String commandReply = media.isEmpty()
+					? userNameService.handleSelfServiceCommand(sessionId, question) : null;
 			if (commandReply != null) {
+				answer = commandReply;
+			} else if (media.isEmpty() && (commandReply = commandHandler.handle(question)) != null) {
 				answer = commandReply;
 			} else if (media.isEmpty()
 					&& (commandReply = agentModeHandler.handle(sessionId, question)) != null) {
@@ -523,7 +551,7 @@ public class IlinkChatRunner {
 				generatedDocument = assistantReply.document();
 				generatedAudio = assistantReply.audio();
 			}
-			answer = safeReply(answer);
+			answer = namedReply(sessionId, answer);
 			// 对话审计默认关闭；开启后记录问答对，供控制台排查。
 			auditService.record(sessionId, question, answer);
 			if (isSuperseded(sessionId, messageVersion)) {
@@ -545,22 +573,22 @@ public class IlinkChatRunner {
 			if (generatedDocument == null && generatedAudio == null && !unsupportedVoice) {
 				answer = commandHandler.addWelcomeForFirstContact(sessionId, answer);
 			}
-			answer = safeReply(answer);
+			answer = namedReply(sessionId, answer);
 			log.info("准备通过 iLink SDK 发送回复，字数={}，等待={}毫秒", answer.length(), targetDelayMs);
 			if (generatedDocument != null) {
-				client.sendFile(userId, generatedDocument.bytes(), generatedDocument.fileName(), answer);
+				sendFileWithReply(client, userId, generatedDocument.bytes(), generatedDocument.fileName(), answer);
 			} else if (generatedAudio != null) {
-				client.sendFile(userId, generatedAudio.bytes(), generatedAudio.fileName(), answer);
+				sendFileWithReply(client, userId, generatedAudio.bytes(), generatedAudio.fileName(), answer);
 			} else if (assistantReply != null && assistantReply.image() != null) {
-				client.sendImage(userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
+				sendImageWithReply(client, userId, assistantReply.image().bytes(), assistantReply.image().fileName(), answer);
 			} else {
-				client.sendText(userId, answer);
+				sendTextParts(client, userId, answer);
 			}
 			log.info("iLink SDK 回复发送成功");
 		} catch (ApplicationException exception) {
 			log.warn("iLink 请求处理失败：{}", exception.getMessage());
 			try {
-				client.sendText(userId, safeReply(exception.getMessage()));
+				sendTextParts(client, userId, namedReply(sessionId, exception.getMessage()));
 			} catch (IOException sendException) {
 				log.error("向微信发送错误提示失败：{}", sendException.getMessage(), sendException);
 			}
@@ -569,7 +597,7 @@ public class IlinkChatRunner {
 					exception.getMessage(), exception);
 			try {
 				String message = exception.getMessage();
-				client.sendText(userId, safeReply(message == null || message.isBlank()
+				sendTextParts(client, userId, namedReply(sessionId, message == null || message.isBlank()
 						? "请求处理失败，请稍后重试。"
 						: "请求处理失败：" + message));
 			} catch (IOException sendException) {
@@ -590,6 +618,20 @@ public class IlinkChatRunner {
 		}
 		return delivered;
 	}
+
+	private void deliverBilibiliLoginQr(String sessionId, com.example.bot.agent.AgentTask task) {
+		SessionAddress address = parseSessionId(sessionId);
+		AccountRuntime runtime = accounts.get(address.accountId());
+		ILinkClient client = runtime == null ? null : runtime.client;
+		if (client == null || !client.isLoggedIn()) return;
+		try {
+			String content = bilibiliLogin.qrContent(sessionId);
+			client.sendImage(address.peerUserId(), qrCodes.renderPng(content), "bilibili-login-qr.png",
+					"请使用本人的 Bilibili App 扫码确认登录。登录完成后回复“已扫码”，我会继续处理收藏夹任务。");
+		} catch (IOException | RuntimeException error) {
+			log.warn("发送 Bilibili 登录二维码失败：task={}, 原因={}", task.getId(), error.getMessage());
+		}
+	}
 	/** 主动推送入口：定时提醒使用。 */
 	private boolean pushText(String sessionId, String text) {
 		SessionAddress address = parseSessionId(sessionId);
@@ -597,7 +639,7 @@ public class IlinkChatRunner {
 		ILinkClient current = runtime == null ? null : runtime.client;
 		if (current == null || !current.isLoggedIn()) return false;
 		try {
-			current.sendText(address.peerUserId(), safeReply(text));
+			sendTextParts(current, address.peerUserId(), namedReply(sessionId, text));
 			return true;
 		} catch (IOException | RuntimeException error) {
 			log.warn("通过 iLink 主动推送失败：账户={}，原因={}", address.accountId(), error.getMessage());
@@ -686,11 +728,13 @@ public class IlinkChatRunner {
 		return "audio/x-ms-wma";
 	}
 
-	private void sendMediaFailureReply(ILinkClient client, String userId) throws InterruptedException {
+	private void sendMediaFailureReply(ILinkClient client, String sessionId, String userId)
+			throws InterruptedException {
 		boolean typingStarted = startTyping(client, userId);
 		try {
 			sleep(randomDelayMs());
-			client.sendText(userId, "这张图片或视频下载失败了，可能文件过大或格式暂不支持，请换一个文件再试。");
+			client.sendText(userId, namedReply(sessionId,
+					"这张图片或视频下载失败了，可能文件过大或格式暂不支持，请换一个文件再试。"));
 		} catch (IOException exception) {
 			log.error("发送媒体失败提示时出错：{}", exception.getMessage(), exception);
 		} finally {
@@ -744,10 +788,101 @@ public class IlinkChatRunner {
 
 	private String safeReply(String answer) {
 		String value = answer == null || answer.isBlank() ? "抱歉，我暂时无法生成回答，请稍后再试。" : answer.trim();
-		if (value.length() <= maxReplyChars) {
-			return value;
+		return plainTextForWechat(value);
+	}
+
+	/** Converts the small, common subset of model-generated LaTex into text that WeChat can display. */
+	static String plainTextForWechat(String answer) {
+		Matcher matcher = LATEX_EXPRESSION.matcher(answer == null ? "" : answer);
+		StringBuffer rendered = new StringBuffer();
+		while (matcher.find()) {
+			String formula = matcher.group(1) != null ? matcher.group(1)
+					: matcher.group(2) != null ? matcher.group(2) : matcher.group(3);
+			matcher.appendReplacement(rendered, Matcher.quoteReplacement(renderLatex(formula)));
 		}
-		return value.substring(0, maxReplyChars - 8) + "……（已截断）";
+		matcher.appendTail(rendered);
+		return rendered.toString().trim();
+	}
+
+	private static String renderLatex(String formula) {
+		String value = formula == null ? "" : formula.trim();
+		for (int pass = 0; pass < 4; pass++) {
+			String next = LATEX_FRACTION.matcher(value).replaceAll("($1) ÷ ($2)");
+			if (next.equals(value)) break;
+			value = next;
+		}
+		value = LATEX_SQRT.matcher(value).replaceAll("√($1)");
+		for (int pass = 0; pass < 4; pass++) {
+			String next = LATEX_TEXT.matcher(value).replaceAll("$1");
+			if (next.equals(value)) break;
+			value = next;
+		}
+		return value.replace("\\left", "").replace("\\right", "")
+				.replace("\\div", "÷").replace("\\times", "×").replace("\\cdot", "·")
+				.replace("\\approx", "≈").replace("\\leq", "≤").replace("\\geq", "≥")
+				.replace("\\neq", "≠").replace("\\pm", "±").replace("\\%", "%")
+				.replaceAll("\\^\\{([^{}]{1,40})}", "^$1")
+				.replaceAll("_\\{([^{}]{1,40})}", "_$1")
+				.replaceAll("\\s+", " ").trim();
+	}
+
+	/**
+	 * 微信单条文本有长度限制。长回复按段落、换行和句末标点拆分，确保正文不会丢失。
+	 */
+	static List<String> splitReply(String answer, int maxChars) {
+		String remaining = answer == null || answer.isBlank()
+				? "抱歉，我暂时无法生成回答，请稍后再试。"
+				: answer.trim();
+		int limit = Math.max(1, maxChars);
+		List<String> parts = new ArrayList<>();
+		while (remaining.length() > limit) {
+			int boundary = preferredReplyBoundary(remaining, limit);
+			String part = remaining.substring(0, boundary).trim();
+			if (!part.isEmpty()) {
+				parts.add(part);
+			}
+			remaining = remaining.substring(boundary).stripLeading();
+		}
+		if (!remaining.isEmpty()) {
+			parts.add(remaining);
+		}
+		return parts;
+	}
+
+	private static int preferredReplyBoundary(String text, int limit) {
+		int minimumPreferredBoundary = Math.max(1, (int) (limit * 0.55));
+		int paragraph = text.lastIndexOf("\n\n", limit);
+		if (paragraph >= minimumPreferredBoundary) return paragraph + 2;
+		int newline = text.lastIndexOf('\n', limit);
+		if (newline >= minimumPreferredBoundary) return newline + 1;
+		for (int index = limit - 1; index >= minimumPreferredBoundary; index--) {
+			if ("。！？；;，,".indexOf(text.charAt(index)) >= 0) return index + 1;
+		}
+		return limit;
+	}
+
+	private void sendTextParts(ILinkClient client, String userId, String answer) throws IOException {
+		for (String part : splitReply(answer, maxReplyChars)) {
+			client.sendText(userId, part);
+		}
+	}
+
+	private void sendFileWithReply(ILinkClient client, String userId, byte[] bytes, String fileName, String answer)
+			throws IOException {
+		List<String> parts = splitReply(answer, maxReplyChars);
+		client.sendFile(userId, bytes, fileName, parts.get(0));
+		for (int index = 1; index < parts.size(); index++) {
+			client.sendText(userId, parts.get(index));
+		}
+	}
+
+	private void sendImageWithReply(ILinkClient client, String userId, byte[] bytes, String fileName, String answer)
+			throws IOException {
+		List<String> parts = splitReply(answer, maxReplyChars);
+		client.sendImage(userId, bytes, fileName, parts.get(0));
+		for (int index = 1; index < parts.size(); index++) {
+			client.sendText(userId, parts.get(index));
+		}
 	}
 
 	private long randomDelayMs() {
@@ -807,6 +942,10 @@ public class IlinkChatRunner {
 		return runtime.view(true);
 	}
 
+	private String namedReply(String sessionId, String answer) {
+		return safeReply(userNameService.decorateReply(sessionId, safeReply(answer)));
+	}
+
 	/** Creates an account while preserving the optional admin display name. */
 	public synchronized AccountView createAccount(String displayName) {
 		AccountView created = createAccount();
@@ -816,7 +955,8 @@ public class IlinkChatRunner {
 	public synchronized AccountView updateAccountDisplayName(String accountId, String displayName) {
 		AccountRuntime runtime = accounts.get(accountId);
 		if (runtime == null) throw new IllegalArgumentException("iLink 账户不存在：" + accountId);
-		runtime.displayName = displayName == null || displayName.isBlank() ? null : displayName.trim();
+		String saved = accountProfiles.updateDisplayName(accountId, displayName);
+		runtime.displayName = saved.isBlank() ? null : saved;
 		return runtime.view(false);
 	}
 
@@ -842,6 +982,7 @@ public class IlinkChatRunner {
 		runtime.status = AccountStatus.DELETED;
 		closeAccount(runtime);
 		sessionStore.delete(accountId);
+		accountProfiles.delete(accountId);
 		int conversations = clearAccountData(accountId);
 		log.info("iLink 账户及其关联数据已删除：账户={}，对话数={}", accountId, conversations);
 	}
@@ -865,8 +1006,9 @@ public class IlinkChatRunner {
 		int conversations = assistantService.clearConversationsByPrefix(prefix);
 		int reminders = reminderService.deleteByUserIdPrefix(prefix);
 		int voicePreferences = voicePreferenceService.clearByUserIdPrefix(prefix);
-		log.info("已清理机器人账户数据：账户={}，对话={}，提醒={}，音色偏好={}",
-				accountId, conversations, reminders, voicePreferences);
+		int userNames = userNameService.deleteByAccount(accountId);
+		log.info("已清理机器人账户数据：账户={}，对话={}，提醒={}，音色偏好={}，永久称呼={}",
+				accountId, conversations, reminders, voicePreferences, userNames);
 		return conversations;
 	}
 

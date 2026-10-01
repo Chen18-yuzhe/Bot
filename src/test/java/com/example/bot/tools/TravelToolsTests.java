@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -16,6 +18,7 @@ import com.example.bot.agent.ErrorKind;
 import com.example.bot.travel.IdempotencyService;
 import com.example.bot.travel.TravelAuditService;
 import com.example.bot.travel.TravelIntegrationGateway;
+import com.example.bot.travel.RailMcpClient;
 import com.example.bot.travel.TravelModels.PlanRequest;
 import com.example.bot.travel.TravelModels.PlanResponse;
 import com.example.bot.travel.TravelModels.OrderResponse;
@@ -86,6 +89,25 @@ class TravelToolsTests {
 		assertNotNull(flight.degradedContent());
 		assertTrue(rail.degradedContent().contains("12306"));
 		assertTrue(flight.degradedContent().contains("不得伪造"));
+	}
+
+	@Test
+	void transportToolUsesTheReadOnly12306McpWhenEnabled() throws Exception {
+		RailMcpClient railMcp = mock(RailMcpClient.class);
+		when(railMcp.enabled()).thenReturn(true);
+		when(railMcp.tickets("北京", "杭州", "2026-08-10", 12))
+				.thenReturn("[{\"train\":\"G31\",\"seat\":\"二等座\"}]");
+		TravelTransportTool tool = new TravelTransportTool("", "", railMcp,
+				"https://test.api.amadeus.com", "", "", objectMapper);
+
+		ToolResult result = tool.execute(objectMapper.readTree("""
+				{"mode":"rail","origin":"北京","destination":"杭州",
+				 "departureDate":"2026-08-10","travelers":1}
+				"""), new ToolContext("wx-user", "查火车"));
+
+		assertTrue(result.content().contains("12306_MCP"));
+		assertTrue(result.content().contains("G31"));
+		assertTrue(result.content().contains("readOnly"));
 	}
 
 	@Test

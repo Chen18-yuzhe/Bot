@@ -64,4 +64,29 @@ class BilibiliLiveApiTests {
 		assertThat(videos).extracting(BilibiliLiveApi.LiveVideo::folderId)
 				.containsOnly(2769950940L);
 	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void readsAndDeduplicatesDanmakuForTheVideoCid() throws Exception {
+		HttpClient client = mock(HttpClient.class);
+		HttpResponse<String> viewResponse = mock(HttpResponse.class);
+		HttpResponse<String> danmakuResponse = mock(HttpResponse.class);
+		when(viewResponse.statusCode()).thenReturn(200);
+		when(viewResponse.body()).thenReturn("{\"code\":0,\"data\":{\"cid\":12345}}");
+		when(danmakuResponse.statusCode()).thenReturn(200);
+		when(danmakuResponse.body()).thenReturn("<i><d p=\"1,1,25,16777215\">讲得清楚</d><d p=\"2,1,25,16777215\">讲得清楚</d><d p=\"3,1,25,16777215\">收藏了 &amp; 感谢</d></i>");
+		when(client.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+				.thenReturn(viewResponse, danmakuResponse);
+		BilibiliLiveApi api = new BilibiliLiveApi(client, new ObjectMapper());
+
+		var danmaku = api.danmaku("SESSDATA=secret; DedeUserID=12345", "BV1test12345");
+
+		assertThat(danmaku.totalComments()).isEqualTo(3);
+		assertThat(danmaku.samples()).containsExactly("讲得清楚", "收藏了 & 感谢");
+		ArgumentCaptor<HttpRequest> request = ArgumentCaptor.forClass(HttpRequest.class);
+		verify(client, org.mockito.Mockito.times(2)).send(request.capture(), any(HttpResponse.BodyHandler.class));
+		assertThat(request.getAllValues()).extracting(value -> value.uri().toString())
+				.containsExactly("https://api.bilibili.com/x/web-interface/view?bvid=BV1test12345",
+						"https://api.bilibili.com/x/v1/dm/list.so?oid=12345");
+	}
 }

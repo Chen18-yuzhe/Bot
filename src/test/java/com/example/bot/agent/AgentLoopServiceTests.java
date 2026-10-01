@@ -14,16 +14,19 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.example.bot.model.ChatModel;
+import com.example.bot.model.ChatRequest;
+import com.example.bot.model.ChatResponse;
 import com.example.bot.tools.AssistantToolRegistry;
 
 class AgentLoopServiceTests {
 
 	@Test
 	void selfChecksAfterRecoverableModelFailureBeforeReturningTheTask() throws Exception {
-		AgentModelClient model = mock(AgentModelClient.class);
-		when(model.call(any(), any(), any(Integer.class)))
+		ChatModel model = mock(ChatModel.class);
+		when(model.chat(any(ChatRequest.class)))
 				.thenThrow(new IllegalArgumentException("bad request"))
-				.thenReturn(new AgentModelClient.AgentModelTurn("已完成", List.of(), 1, 1, "test-model"));
+				.thenReturn(new ChatResponse("已完成", List.of(), 1, 1, "test-model"));
 		AgentLoopService loop = loop(model, List.of(new GenericTaskType()));
 		AgentTask task = runnableTask();
 
@@ -32,12 +35,12 @@ class AgentLoopServiceTests {
 		assertEquals(AgentTaskStatus.COMPLETED, task.getStatus(), task.getErrorSummary());
 		assertTrue(task.getTranscript().stream()
 				.anyMatch(entry -> "user".equals(entry.role()) && entry.text().startsWith("框架自检：模型调用失败")));
-		verify(model, times(2)).call(any(), any(), any(Integer.class));
+		verify(model, times(2)).chat(any(ChatRequest.class));
 	}
 
 	@Test
 	void stopsBeforeCallingModelWhenDeadlineHasExpired() throws Exception {
-		AgentModelClient model = mock(AgentModelClient.class);
+		ChatModel model = mock(ChatModel.class);
 		AgentTask task = runnableTask();
 		task.setDeadlineAtMs(System.currentTimeMillis() - 1);
 
@@ -45,12 +48,12 @@ class AgentLoopServiceTests {
 
 		assertEquals(AgentTaskStatus.FAILED, task.getStatus());
 		assertEquals(TerminationReason.TIMEOUT, task.getTerminationReason());
-		verify(model, never()).call(any(), any(), any(Integer.class));
+		verify(model, never()).chat(any(ChatRequest.class));
 	}
 
 	@Test
 	void stopsAtConfiguredMaximumStepBoundary() throws Exception {
-		AgentModelClient model = mock(AgentModelClient.class);
+		ChatModel model = mock(ChatModel.class);
 		AgentTask task = runnableTask();
 		task.setStepCount(task.getMaxSteps());
 
@@ -58,12 +61,12 @@ class AgentLoopServiceTests {
 
 		assertEquals(AgentTaskStatus.FAILED, task.getStatus());
 		assertEquals(TerminationReason.MAX_STEPS, task.getTerminationReason());
-		verify(model, never()).call(any(), any(), any(Integer.class));
+		verify(model, never()).chat(any(ChatRequest.class));
 	}
 
 	@Test
 	void stopsWhenPersistedTokenBudgetIsAlreadyExhausted() throws Exception {
-		AgentModelClient model = mock(AgentModelClient.class);
+		ChatModel model = mock(ChatModel.class);
 		AgentTask task = runnableTask();
 		task.setTokensUsed(task.getTokenBudget());
 
@@ -71,12 +74,12 @@ class AgentLoopServiceTests {
 
 		assertEquals(AgentTaskStatus.FAILED, task.getStatus());
 		assertEquals(TerminationReason.TOKEN_BUDGET_EXHAUSTED, task.getTerminationReason());
-		verify(model, never()).call(any(), any(), any(Integer.class));
+		verify(model, never()).chat(any(ChatRequest.class));
 	}
 
 	@Test
 	void appliesPersistedPauseRequestAtNextBoundary() throws Exception {
-		AgentModelClient model = mock(AgentModelClient.class);
+		ChatModel model = mock(ChatModel.class);
 		AgentTask task = runnableTask();
 		task.setControlRequest(AgentTask.ControlRequest.PAUSE);
 
@@ -84,7 +87,7 @@ class AgentLoopServiceTests {
 
 		assertEquals(AgentTaskStatus.PAUSED, task.getStatus());
 		assertEquals(AgentTask.ControlRequest.NONE, task.getControlRequest());
-		verify(model, never()).call(any(), any(), any(Integer.class));
+		verify(model, never()).chat(any(ChatRequest.class));
 	}
 
 	@Test
@@ -94,9 +97,9 @@ class AgentLoopServiceTests {
 			@Override public String systemPrompt(AgentTask task) { return "Return a verifiable answer."; }
 			@Override public String validateCompletion(AgentTask task, String answer) { return "缺少证据"; }
 		};
-		AgentModelClient model = mock(AgentModelClient.class);
-		when(model.call(any(), any(), any(Integer.class)))
-				.thenReturn(new AgentModelClient.AgentModelTurn("没有证据的答案", List.of(), 1, 1, "test-model"));
+		ChatModel model = mock(ChatModel.class);
+		when(model.chat(any(ChatRequest.class)))
+				.thenReturn(new ChatResponse("没有证据的答案", List.of(), 1, 1, "test-model"));
 		AgentTask task = runnableTask();
 		task.setTaskType("strict");
 
@@ -104,10 +107,10 @@ class AgentLoopServiceTests {
 
 		assertEquals(AgentTaskStatus.FAILED, task.getStatus());
 		assertEquals(TerminationReason.FINAL_VALIDATION_FAILED, task.getTerminationReason());
-		verify(model, times(2)).call(any(), any(), any(Integer.class));
+		verify(model, times(2)).chat(any(ChatRequest.class));
 	}
 
-	private static AgentLoopService loop(AgentModelClient model, List<AgentTaskType> taskTypes) {
+	private static AgentLoopService loop(ChatModel model, List<AgentTaskType> taskTypes) {
 		AgentTaskStore store = mock(AgentTaskStore.class);
 		AgentTraceRecorder trace = mock(AgentTraceRecorder.class);
 		AgentToolExecutor tools = mock(AgentToolExecutor.class);

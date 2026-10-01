@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Map;
 
 import org.slf4j.Logger;
@@ -45,6 +46,7 @@ import com.example.bot.document.DocumentSummaryService;
 import com.example.bot.knowledge.KnowledgeBaseService;
 import com.example.bot.ilink.IlinkChatRunner;
 import com.example.bot.ilink.QrCodeSvgService;
+import com.example.bot.ilink.UserNameService;
 import com.example.bot.reminder.ReminderService;
 import com.example.bot.tools.AssistantToolRegistry;
 
@@ -67,6 +69,7 @@ public class AdminController {
 	private final ConversationAuditService audit;
 	private final SqliteConversationStore sqliteConversations;
 	private final AgentLoopService agentLoop;
+	private final UserNameService userNames;
 
 	public AdminController(
 			@Value("${assistant.logs.file:/var/lib/wechat-agent-platform/logs/application.log}") String applicationLogFile,
@@ -75,7 +78,8 @@ public class AdminController {
 			ObjectProvider<StringRedisTemplate> redisProvider,
 			ObjectProvider<IlinkChatRunner> ilinkRunner,
 			QrCodeSvgService qrCodeSvgService, DocumentSummaryService documents, AdminSessionService sessions,
-			ConversationAuditService audit, SqliteConversationStore sqliteConversations, AgentLoopService agentLoop) {
+			ConversationAuditService audit, SqliteConversationStore sqliteConversations,
+			AgentLoopService agentLoop, UserNameService userNames) {
 		this.applicationLogFile = Path.of(applicationLogFile).toAbsolutePath().normalize();
 		this.registry = registry;
 		this.metrics = metrics;
@@ -90,6 +94,7 @@ public class AdminController {
 		this.audit = audit;
 		this.sqliteConversations = sqliteConversations;
 		this.agentLoop = agentLoop;
+		this.userNames = userNames;
 	}
 
 	@GetMapping(value = "/ilink/console", produces = MediaType.TEXT_HTML_VALUE)
@@ -436,6 +441,81 @@ public class AdminController {
 	}
 
 	public record ConversationSummaryUpdate(String sessionId, String summary) { }
+
+	@GetMapping("/ops/user-names")
+	public List<UserNameView> userNames(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@RequestParam String accountId, @RequestParam(defaultValue = "100") int limit) {
+		authorizeIlink(providedToken);
+		requiredIlinkRunner().accountView(accountId, false);
+		LinkedHashSet<String> sessionIds = new LinkedHashSet<>();
+		sqliteConversations.listByAccount(accountId, limit, memory.retentionCutoffMillis())
+				.forEach(item -> sessionIds.add(item.sessionId()));
+		// A permanent profile outlives short-lived conversation history. Include it
+		// here so a refresh cannot make a successfully saved setting disappear.
+		sessionIds.addAll(userNames.profileSessionIds(accountId));
+		return sessionIds.stream()
+				.limit(Math.max(1, Math.min(200, limit)))
+				.map(sessionId -> {
+					String configured = userNames.configuredName(sessionId);
+					return new UserNameView(sessionId, userId(sessionId), configured,
+							userNames.replyName(sessionId), !configured.isBlank());
+				})
+				.toList();
+	}
+
+	@PatchMapping("/ops/user-names")
+	public UserNameView updateUserName(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@org.springframework.web.bind.annotation.RequestBody UserNameUpdate request) {
+		authorizeIlink(providedToken);
+		if (request == null || request.sessionId() == null || request.sessionId().isBlank()) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sessionId is required");
+		}
+		String accountId = accountId(request.sessionId());
+		requiredIlinkRunner().accountView(accountId, false);
+		String configured = userNames.update(request.sessionId(), request.displayName());
+		return new UserNameView(request.sessionId(), userId(request.sessionId()), configured,
+				userNames.replyName(request.sessionId()), !configured.isBlank());
+	}
+
+	private static String accountId(String sessionId) {
+		int marker = sessionId.indexOf("::");
+		return marker > 0 ? sessionId.substring(0, marker) : "default";
+	}
+
+	private static String userId(String sessionId) {
+		int marker = sessionId.indexOf("::");
+		return marker > 0 ? sessionId.substring(marker + 2) : sessionId;
+	}
+
+	public record UserNameUpdate(String sessionId, String displayName) { }
+	public record UserNameView(String sessionId, String userId, String displayName,
+			String effectiveName, boolean customized) { }
+
+	@GetMapping("/ops/user-memories")
+	public Map<String, String> userMemories(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@RequestParam String sessionId) {
+		authorizeIlink(providedToken);
+		requiredIlinkRunner().accountView(accountId(sessionId), false);
+		return userNames.memories(sessionId);
+	}
+
+	@PatchMapping("/ops/user-memories")
+	public Map<String, Object> updateUserMemory(
+			@RequestHeader(name = "X-Admin-Token", required = false) String providedToken,
+			@org.springframework.web.bind.annotation.RequestBody UserMemoryUpdate request) {
+		authorizeIlink(providedToken);
+		if (request == null || request.sessionId() == null || request.sessionId().isBlank()) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sessionId is required");
+		}
+		requiredIlinkRunner().accountView(accountId(request.sessionId()), false);
+		String saved = userNames.updateMemory(request.sessionId(), request.key(), request.value());
+		return Map.of("saved", !saved.isBlank(), "key", request.key(), "value", saved);
+	}
+
+	public record UserMemoryUpdate(String sessionId, String key, String value) { }
 
 
 	@GetMapping("/status")

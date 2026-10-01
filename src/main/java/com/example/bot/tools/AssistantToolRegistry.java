@@ -6,9 +6,13 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.alibaba.dashscope.tools.ToolBase;
-import com.alibaba.dashscope.tools.ToolFunction;
+import com.alibaba.dashscope.tools.FunctionDefinition;
+import com.example.bot.model.ToolDefinition;
 
+/**
+ * 工具注册表。向模型推理层暴露供应商无关的 {@link ToolDefinition}，
+ * 内部把工具实现声明的 FunctionDefinition 翻译为通用 JSON Schema 描述。
+ */
 @Component
 public class AssistantToolRegistry {
 	private final Map<String, AssistantTool> tools;
@@ -24,15 +28,15 @@ public class AssistantToolRegistry {
 		this.tools = Map.copyOf(indexed);
 	}
 
-	public List<ToolBase> definitions() {
+	public List<ToolDefinition> definitions() {
 		return tools.values().stream()
-				.map(tool -> (ToolBase) ToolFunction.builder().function(tool.definition()).build())
+				.map(tool -> toDefinition(tool.definition()))
 				.toList();
 	}
 
-	public ToolBase definition(String name) {
+	public ToolDefinition definition(String name) {
 		AssistantTool tool = require(name);
-		return ToolFunction.builder().function(tool.definition()).build();
+		return toDefinition(tool.definition());
 	}
 
 	public AssistantTool require(String name) {
@@ -43,5 +47,10 @@ public class AssistantToolRegistry {
 
 	public List<String> names() {
 		return tools.keySet().stream().sorted().toList();
+	}
+
+	private static ToolDefinition toDefinition(FunctionDefinition definition) {
+		return new ToolDefinition(definition.getName(), definition.getDescription(),
+				definition.getParameters() == null ? "{}" : definition.getParameters().toString());
 	}
 }

@@ -9,10 +9,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import com.alibaba.dashscope.tools.FunctionDefinition;
 import com.example.bot.agent.AgentToolException;
+import com.example.bot.travel.RailMcpClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.gson.JsonParser;
@@ -48,6 +50,7 @@ public class TravelTransportTool implements AssistantTool {
 
 	private final String railApiUrl;
 	private final String railApiKey;
+	private final RailMcpClient railMcp;
 	private final String amadeusBaseUrl;
 	private final String amadeusClientId;
 	private final String amadeusClientSecret;
@@ -55,19 +58,30 @@ public class TravelTransportTool implements AssistantTool {
 	private final HttpClient http = HttpClient.newBuilder()
 			.connectTimeout(Duration.ofSeconds(10)).build();
 
+	@Autowired
 	public TravelTransportTool(
 			@Value("${travel.rail.api-url:}") String railApiUrl,
 			@Value("${travel.rail.api-key:}") String railApiKey,
+			RailMcpClient railMcp,
 			@Value("${travel.flight.amadeus.base-url:https://test.api.amadeus.com}") String amadeusBaseUrl,
 			@Value("${travel.flight.amadeus.client-id:}") String amadeusClientId,
 			@Value("${travel.flight.amadeus.client-secret:}") String amadeusClientSecret,
 			ObjectMapper objectMapper) {
 		this.railApiUrl = railApiUrl;
 		this.railApiKey = railApiKey;
+		this.railMcp = railMcp;
 		this.amadeusBaseUrl = amadeusBaseUrl;
 		this.amadeusClientId = amadeusClientId;
 		this.amadeusClientSecret = amadeusClientSecret;
 		this.objectMapper = objectMapper;
+	}
+
+	/** Convenience constructor retained for tests and integrations without Spring. */
+	public TravelTransportTool(String railApiUrl, String railApiKey, String amadeusBaseUrl,
+			String amadeusClientId, String amadeusClientSecret, ObjectMapper objectMapper) {
+		this(railApiUrl, railApiKey,
+				new RailMcpClient(false, "", "", 10, objectMapper),
+				amadeusBaseUrl, amadeusClientId, amadeusClientSecret, objectMapper);
 	}
 
 	@Override
@@ -91,6 +105,7 @@ public class TravelTransportTool implements AssistantTool {
 	}
 
 	private ToolResult rail(JsonNode arguments) throws Exception {
+		if (railMcp.enabled()) return railMcp(arguments);
 		if (blank(railApiUrl) || blank(railApiKey)) {
 			throw AgentToolException.degraded("火车数据 API 尚未配置",
 					"{\"source\":\"UNCONFIGURED\",\"live\":false,"
@@ -115,6 +130,24 @@ public class TravelTransportTool implements AssistantTool {
 		result.set("data", root.path("result").isMissingNode() ? root : root.path("result"));
 		result.put("bookingNotice", "余票与价格必须在结算前再次确认；12306购票由其官方实名页面完成。");
 		return ToolResult.text(limit(result.toString(), 12_000));
+	}
+
+	private ToolResult railMcp(JsonNode arguments) {
+		String text = railMcp.tickets(required(arguments, "origin"), required(arguments, "destination"),
+				required(arguments, "departureDate"), 12);
+		var result = objectMapper.createObjectNode();
+		result.put("source", "12306_MCP");
+		result.put("mcpServer", "Joooook/12306-mcp@0.3.9");
+		result.put("live", true);
+		result.put("readOnly", true);
+		result.put("queriedAt", java.time.Instant.now().toString());
+		try {
+			result.set("offers", objectMapper.readTree(text));
+		} catch (Exception ignored) {
+			result.put("offersText", text);
+		}
+		result.put("bookingNotice", "第三方 12306 MCP 仅提供查询；余票与票价以铁路12306官方页面为准，实名、下单和付款均由用户在官方页面完成。");
+		return ToolResult.text(limit(result.toString(), 16_000));
 	}
 
 	private ToolResult flight(JsonNode arguments) throws Exception {

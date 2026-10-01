@@ -21,6 +21,10 @@ public class AgentTask {
 	/** Stable, user-facing sequence number within one WeChat session. */
 	private int displayNumber;
 	private String sessionId;
+	/** Owning bot/workspace. "default" is the environment-configured bot. */
+	private String projectId;
+	/** Peer user inside the owning bot/workspace. */
+	private String userId;
 	private String taskType;
 	private String goal;
 	/*
@@ -64,6 +68,18 @@ public class AgentTask {
 	public void setDisplayNumber(int displayNumber) { this.displayNumber = displayNumber; }
 	public String getSessionId() { return sessionId; }
 	public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+	public String getProjectId() {
+		if (projectId != null && !projectId.isBlank()) return projectId;
+		int marker = sessionId == null ? -1 : sessionId.indexOf("::");
+		return marker > 0 ? sessionId.substring(0, marker) : "default";
+	}
+	public void setProjectId(String projectId) { this.projectId = projectId; }
+	public String getUserId() {
+		if (userId != null && !userId.isBlank()) return userId;
+		int marker = sessionId == null ? -1 : sessionId.indexOf("::");
+		return marker > 0 ? sessionId.substring(marker + 2) : sessionId;
+	}
+	public void setUserId(String userId) { this.userId = userId; }
 	public String getTaskType() { return taskType; }
 	public void setTaskType(String taskType) { this.taskType = taskType; }
 	public String getGoal() { return goal; }

@@ -4,6 +4,8 @@ services:
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -16,23 +18,33 @@ services:
   app:
     build: .
     environment:
+      APP_MODEL_PROVIDER: ${APP_MODEL_PROVIDER:-dashscope}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       QWEATHER_API_HOST: ${QWEATHER_API_HOST:-}
       QWEATHER_API_KEY: ${QWEATHER_API_KEY:-}
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
-      BILI_COOKIE: ${BILI_COOKIE:-}
-      BILI_ALLOWED_SESSION_IDS: ${BILI_ALLOWED_SESSION_IDS:-}
       BILI_LOGIN_TIMEOUT_SECONDS: ${BILI_LOGIN_TIMEOUT_SECONDS:-180}
       TRAVEL_SUPPLIER_API_URL: ${TRAVEL_SUPPLIER_API_URL:-}
       TRAVEL_SUPPLIER_API_KEY: ${TRAVEL_SUPPLIER_API_KEY:-}
       TRAVEL_FLIGGY_API_URL: ${TRAVEL_FLIGGY_API_URL:-}
       TRAVEL_FLIGGY_API_KEY: ${TRAVEL_FLIGGY_API_KEY:-}
+      TRAVEL_RAIL_MCP_ENABLED: ${TRAVEL_RAIL_MCP_ENABLED:-false}
+      TRAVEL_RAIL_MCP_COMMAND: ${TRAVEL_RAIL_MCP_COMMAND:-npx}
+      TRAVEL_RAIL_MCP_PACKAGE: ${TRAVEL_RAIL_MCP_PACKAGE:-12306-mcp@0.3.9}
+      TRAVEL_RAIL_MCP_TIMEOUT_SECONDS: ${TRAVEL_RAIL_MCP_TIMEOUT_SECONDS:-45}
       REDIS_URL: redis://redis:6379/0
+      ASSISTANT_ILINK_ENABLED: "true"
       CONVERSATION_STORAGE_FILE: /var/lib/wechat-agent-platform/conversations.json
       AGENT_STORAGE_FILE: /var/lib/wechat-agent-platform/agent-tasks.json
       KNOWLEDGE_BASE_PATH: /var/lib/wechat-agent-platform/knowledge
+      # Credentials, account labels, and user profiles share this durable volume.
+      ILINK_CREDENTIALS_FILE: /var/lib/wechat-agent-platform/ilink/credentials.json
+      # Docker forwards loopback traffic through its bridge, so the application
+      # cannot see the browser request as a loopback address. Host port binding
+      # above remains restricted to 127.0.0.1; the admin token still protects it.
+      ADMIN_PRIVATE_ONLY: "false"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${APP_HOST_PORT:-8080}:8080"
     volumes:
       - app-data:/var/lib/wechat-agent-platform
     depends_on:

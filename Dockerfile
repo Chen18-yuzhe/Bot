@@ -8,12 +8,12 @@ COPY src src
 RUN ./mvnw --batch-mode --no-transfer-progress clean package -DskipTests
 
 FROM eclipse-temurin:21-jre-alpine
-RUN apk add --no-cache curl \
+RUN apk add --no-cache curl nodejs npm \
     && addgroup -S agent \
-    && adduser -S -G agent agent
-COPY --from=build /workspace/target/wechat-agent-platform-1.0.0-boot.jar app.jar
-RUN mkdir -p /var/lib/wechat-agent-platform \
-    && chown -R agent:agent /opt/wechat-agent-platform /var/lib/wechat-agent-platform
+    && adduser -S -G agent agent \
+    && mkdir -p /opt/wechat-agent-platform /var/lib/wechat-agent-platform
+COPY --from=build /workspace/target/wechat-agent-platform-1.0.0-boot.jar /opt/wechat-agent-platform/app.jar
+RUN chown -R agent:agent /opt/wechat-agent-platform /var/lib/wechat-agent-platform
 WORKDIR /var/lib/wechat-agent-platform
 USER agent
 EXPOSE 8080

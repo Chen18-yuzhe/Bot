@@ -5,17 +5,15 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import com.example.demo.model.BiliVideo;
 import com.example.demo.service.FavService;
-import com.example.bot.ApplicationException;
 import com.example.bot.knowledge.KnowledgeBaseService;
 
 import jakarta.annotation.PreDestroy;
@@ -34,60 +32,68 @@ public class BilibiliFavoritesService {
 	private final Function<String, FavService> clientFactory;
 	private final BilibiliLiveApi liveApi;
 	private final KnowledgeBaseService knowledgeBase;
-	private final String configuredCookie;
-	private final Set<String> allowedSessionIds;
-	private String runtimeCookie = "";
-	private FavService client;
+	private final ConcurrentHashMap<String, AccountState> accountStates = new ConcurrentHashMap<>();
 
 	@Autowired
-	public BilibiliFavoritesService(@Value("${bilibili.cookie:}") String configuredCookie,
-			@Value("${bilibili.allowed-session-ids:}") String allowedSessionIds,
-			KnowledgeBaseService knowledgeBase, BilibiliLiveApi liveApi) {
-		this(configuredCookie, allowedSessionIds, knowledgeBase, FavService::new, liveApi);
+	public BilibiliFavoritesService(KnowledgeBaseService knowledgeBase, BilibiliLiveApi liveApi) {
+		this(knowledgeBase, FavService::new, liveApi);
 	}
 
-	BilibiliFavoritesService(String configuredCookie, String allowedSessionIds,
-			KnowledgeBaseService knowledgeBase,
+	BilibiliFavoritesService(KnowledgeBaseService knowledgeBase,
 			Function<String, FavService> clientFactory, BilibiliLiveApi liveApi) {
-		this.configuredCookie = clean(configuredCookie);
-		this.allowedSessionIds = parseAllowedSessions(allowedSessionIds);
 		this.knowledgeBase = knowledgeBase;
 		this.clientFactory = clientFactory;
 		this.liveApi = liveApi;
 	}
 
 	public synchronized boolean authenticated() {
-		return validCookie(activeCookie());
+		return authenticated("default");
 	}
 
 	public synchronized Status status() {
-		String source = !configuredCookie.isBlank() ? "environment"
-				: (!runtimeCookie.isBlank() ? "runtime" : "none");
-		return new Status(authenticated(), source,
-				client == null ? 0 : client.countWithSubtitle());
+		return status("default");
+	}
+
+	public synchronized boolean authenticated(String sessionOrProjectId) {
+		return validCookie(activeCookie(credentialId(sessionOrProjectId)));
+	}
+
+	public synchronized Status status(String sessionOrProjectId) {
+		String credentialId = credentialId(sessionOrProjectId);
+		AccountState state = accountStates.get(credentialId);
+		String source = state != null && !state.runtimeCookie.isBlank() ? "qr-login" : "none";
+		return new Status(authenticated(credentialId), source,
+				state == null || state.client == null ? 0 : state.client.countWithSubtitle());
 	}
 
 	public boolean authorized(String sessionId) {
-		return sessionId != null && allowedSessionIds.contains(sessionId.trim());
+		if (sessionId == null || sessionId.isBlank()) return false;
+		return true;
 	}
 
 	public void requireAuthorized(String sessionId) {
 		if (!authorized(sessionId)) {
-			throw new ApplicationException(HttpStatus.FORBIDDEN,
-					"当前会话未获准访问私人 Bilibili 收藏夹；请由管理员配置 BILI_ALLOWED_SESSION_IDS");
+			throw new IllegalArgumentException("Bilibili 会话无效");
 		}
 	}
 
-	public synchronized void useRuntimeCookie(String cookie) {
+	public synchronized void useRuntimeCookie(String projectId, String cookie) {
+		String project = credentialId(projectId);
 		String value = clean(cookie);
 		if (!validCookie(value)) throw new IllegalArgumentException("Bilibili 登录结果缺少 DedeUserID");
-		closeClient();
-		runtimeCookie = value;
+		AccountState state = accountStates.computeIfAbsent(project, ignored -> new AccountState());
+		closeClient(state);
+		state.runtimeCookie = value;
 	}
 
 	public synchronized List<Folder> listFolders() {
+		return listFolders("default");
+	}
+
+	public synchronized List<Folder> listFolders(String sessionId) {
+		String projectId = credentialId(sessionId);
 		try {
-			return liveApi.listFolders(activeCookie()).entrySet().stream()
+			return liveApi.listFolders(activeCookie(projectId)).entrySet().stream()
 					.map(entry -> new Folder(entry.getKey(), entry.getValue()))
 					.sorted(Comparator.comparing(Folder::name, String.CASE_INSENSITIVE_ORDER))
 					.toList();
@@ -97,23 +103,33 @@ public class BilibiliFavoritesService {
 	}
 
 	public synchronized SyncResult syncFolder(long folderId, boolean includeSubtitles) {
+		return syncFolder("default", folderId, includeSubtitles);
+	}
+
+	public synchronized SyncResult syncFolder(String sessionId, long folderId, boolean includeSubtitles) {
+		String projectId = credentialId(sessionId);
 		if (folderId <= 0) throw new IllegalArgumentException("folderId 必须为正整数");
 		try {
-			requireOwnedFolder(folderId);
+			requireOwnedFolder(projectId, folderId);
 			int synced = includeSubtitles
-					? client().fetchFavWithSubtitle(folderId)
-					: client().fetchFavMeta(folderId);
-			return new SyncResult(folderId, synced, client().countWithSubtitle(), includeSubtitles);
+					? client(projectId).fetchFavWithSubtitle(folderId)
+					: client(projectId).fetchFavMeta(folderId);
+			return new SyncResult(folderId, synced, client(projectId).countWithSubtitle(), includeSubtitles);
 		} catch (Exception error) {
 			throw upstream("同步 Bilibili 收藏夹失败", error);
 		}
 	}
 
 	public synchronized List<Video> listVideos(String query, int requestedLimit) {
+		return listVideos("default", query, requestedLimit);
+	}
+
+	public synchronized List<Video> listVideos(String sessionId, String query, int requestedLimit) {
+		String projectId = credentialId(sessionId);
 		try {
 			List<Video> result = new ArrayList<>();
-			for (Folder folder : listFolders()) {
-				appendLiveVideos(result, folder.id(), query, requestedLimit);
+			for (Folder folder : listFolders(projectId)) {
+				appendLiveVideos(projectId, result, folder.id(), query, requestedLimit);
 				if (result.size() >= boundedLimit(requestedLimit)) break;
 			}
 			return List.copyOf(result);
@@ -123,47 +139,68 @@ public class BilibiliFavoritesService {
 	}
 
 	public synchronized List<Video> listVideos(long folderId, String query, int requestedLimit) {
+		return listVideos("default", folderId, query, requestedLimit);
+	}
+
+	public synchronized List<Video> listVideos(String sessionId, long folderId, String query, int requestedLimit) {
+		String projectId = credentialId(sessionId);
 		if (folderId <= 0) throw new IllegalArgumentException("folderId 必须为正整数");
 		try {
-			requireOwnedFolder(folderId);
+			requireOwnedFolder(projectId, folderId);
 			List<Video> result = new ArrayList<>();
-			appendLiveVideos(result, folderId, query, requestedLimit);
+			appendLiveVideos(projectId, result, folderId, query, requestedLimit);
 			return List.copyOf(result);
 		} catch (Exception error) {
 			throw upstream("读取 Bilibili 收藏夹视频失败", error);
 		}
 	}
 
-	private void appendLiveVideos(List<Video> result, long folderId, String query, int requestedLimit)
+	private void appendLiveVideos(String projectId, List<Video> result, long folderId, String query, int requestedLimit)
 			throws Exception {
 		String keyword = normalizeQuery(query);
 		int limit = boundedLimit(requestedLimit);
-		for (BilibiliLiveApi.LiveVideo video : liveApi.listFolderVideos(activeCookie(), folderId)) {
-			String subtitle = cachedSubtitle(video.bvId());
+		for (BilibiliLiveApi.LiveVideo video : liveApi.listFolderVideos(activeCookie(projectId), folderId)) {
+			String subtitle = cachedSubtitle(projectId, video.bvId());
 			if (!matches(video, subtitle, keyword)) continue;
 			result.add(toVideo(video, subtitle));
 			if (result.size() >= limit) break;
 		}
 	}
 
-	private String cachedSubtitle(String bvId) {
-		if (client == null || bvId == null || bvId.isBlank()) return "";
-		String subtitle = client.getSubtitleText(bvId);
+	private String cachedSubtitle(String projectId, String bvId) {
+		AccountState state = accountStates.get(projectId);
+		if (state == null || state.client == null || bvId == null || bvId.isBlank()) return "";
+		String subtitle = state.client.getSubtitleText(bvId);
 		return subtitle == null ? "" : subtitle;
 	}
 
 	public synchronized String subtitle(String bvId) {
+		return subtitle("default", bvId);
+	}
+
+	public synchronized String subtitle(String sessionId, String bvId) {
+		String projectId = credentialId(sessionId);
 		String id = clean(bvId);
 		if (!id.matches("(?i)BV[0-9A-Za-z]{8,20}")) throw new IllegalArgumentException("BV 号格式无效");
-		String subtitle = client().getSubtitleText(id);
+		String subtitle = client(projectId).getSubtitleText(id);
 		return subtitle == null ? "" : subtitle;
 	}
 
+	public synchronized BilibiliLiveApi.DanmakuSnapshot danmaku(String sessionId, String bvId) {
+		String projectId = credentialId(sessionId);
+		try {
+			return liveApi.danmaku(activeCookie(projectId), bvId);
+		} catch (Exception error) {
+			throw upstream("读取 Bilibili 弹幕失败", error);
+		}
+	}
+
 	public synchronized IngestResult syncAndIngest(long folderId, String sessionId) {
-		SyncResult sync = syncFolder(folderId, true);
+		String projectId = credentialId(sessionId);
+		SyncResult sync = syncFolder(projectId, folderId, true);
 		Set<String> liveVideoIds;
 		try {
-			liveVideoIds = liveApi.listFolderVideos(activeCookie(), folderId).stream()
+			liveVideoIds = liveApi.listFolderVideos(activeCookie(projectId), folderId).stream()
 					.map(BilibiliLiveApi.LiveVideo::bvId)
 					.filter(id -> !id.isBlank())
 					.collect(Collectors.toUnmodifiableSet());
@@ -171,10 +208,10 @@ public class BilibiliFavoritesService {
 			throw upstream("核对 Bilibili 收藏夹实时内容失败", error);
 		}
 		int imported = 0;
-		for (BiliVideo video : client().listAllVideos()) {
+		for (BiliVideo video : client(projectId).listAllVideos()) {
 			if (video.getFavId() == null || video.getFavId().longValue() != folderId) continue;
 			if (!liveVideoIds.contains(video.getBvId())) continue;
-			String subtitle = client().getSubtitleText(video.getBvId());
+			String subtitle = client(projectId).getSubtitleText(video.getBvId());
 			if (subtitle == null || subtitle.isBlank()) continue;
 			String content = knowledgeDocument(video, subtitle);
 			knowledgeBase.upsertForSession(sessionId, "bilibili-" + video.getBvId() + ".md", content);
@@ -185,33 +222,52 @@ public class BilibiliFavoritesService {
 
 	@PreDestroy
 	public synchronized void close() {
-		closeClient();
+		accountStates.values().forEach(this::closeClient);
+		accountStates.clear();
 	}
 
-	private FavService client() {
-		if (client != null) return client;
-		String cookie = activeCookie();
+	private FavService client(String projectId) {
+		AccountState state = accountStates.computeIfAbsent(projectId, ignored -> new AccountState());
+		if (state.client != null) return state.client;
+		String cookie = activeCookie(projectId);
 		if (!validCookie(cookie)) {
-			throw new IllegalStateException("尚未登录 Bilibili；请配置 BILI_COOKIE 或在私有管理接口完成扫码登录");
+			String guidance = "请在控制台为项目 " + projectId + " 完成 Bilibili 扫码登录";
+			throw new IllegalStateException("尚未登录 Bilibili；" + guidance);
 		}
-		client = clientFactory.apply(cookie);
-		return client;
+		state.client = clientFactory.apply(cookie);
+		return state.client;
 	}
 
-	private String activeCookie() {
-		return runtimeCookie.isBlank() ? configuredCookie : runtimeCookie;
+	private String activeCookie(String projectId) {
+		AccountState state = accountStates.get(projectId);
+		if (state != null && !state.runtimeCookie.isBlank()) return state.runtimeCookie;
+		return "";
 	}
 
-	private void requireOwnedFolder(long folderId) throws Exception {
-		if (!liveApi.listFolders(activeCookie()).containsKey(folderId)) {
+	private void requireOwnedFolder(String projectId, long folderId) throws Exception {
+		if (!liveApi.listFolders(activeCookie(projectId)).containsKey(folderId)) {
 			throw new IllegalArgumentException("当前 Bilibili 账号不存在收藏夹 " + folderId);
 		}
 	}
 
-	private void closeClient() {
-		if (client == null) return;
-		client.close();
-		client = null;
+	private void closeClient(AccountState state) {
+		if (state == null || state.client == null) return;
+		state.client.close();
+		state.client = null;
+	}
+
+	public static String projectId(String sessionOrProjectId) {
+		String value = clean(sessionOrProjectId);
+		if (value.isBlank() || "default".equals(value)) return "default";
+		int marker = value.indexOf("::");
+		if (marker > 0) return value.substring(0, marker);
+		return value.matches("(?i)[0-9a-f]{8}-[0-9a-f-]{27,}") ? value : "default";
+	}
+
+	/** Exact session scope for a QR credential; never collapse it to a project. */
+	public static String credentialId(String sessionId) {
+		String value = clean(sessionId);
+		return value.isBlank() ? "default" : value;
 	}
 
 	private static boolean validCookie(String value) {
@@ -288,14 +344,6 @@ public class BilibiliFavoritesService {
 		return value;
 	}
 
-	private static Set<String> parseAllowedSessions(String value) {
-		if (value == null || value.isBlank()) return Set.of();
-		return java.util.Arrays.stream(value.split(","))
-				.map(String::trim)
-				.filter(item -> !item.isBlank())
-				.collect(Collectors.toUnmodifiableSet());
-	}
-
 	private static IllegalStateException upstream(String message, Exception error) {
 		return new IllegalStateException(message + "：" + clean(error.getMessage()), error);
 	}
@@ -311,4 +359,9 @@ public class BilibiliFavoritesService {
 	public record SyncResult(long folderId, int syncedVideos, int localVideosWithSubtitle,
 			boolean subtitlesRequested) { }
 	public record IngestResult(long folderId, int syncedVideos, int importedKnowledgeDocuments) { }
+
+	private static final class AccountState {
+		private String runtimeCookie = "";
+		private FavService client;
+	}
 }

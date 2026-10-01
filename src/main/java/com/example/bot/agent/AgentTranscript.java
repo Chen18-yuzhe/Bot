@@ -2,15 +2,13 @@ package com.example.bot.agent;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
-import com.alibaba.dashscope.common.MultiModalMessage;
-import com.alibaba.dashscope.tools.ToolCallBase;
-import com.alibaba.dashscope.tools.ToolCallFunction;
+import com.example.bot.model.ChatMessage;
+import com.example.bot.model.ToolCall;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
- * Agent 循环的工作对话记录。与 SDK 消息解耦持久化，
+ * Agent 循环的工作对话记录。与模型供应商消息解耦持久化，
  * 任务挂起 / 恢复 / 服务重启后都能重建模型上下文，保证断点续跑不丢进度。
  */
 public final class AgentTranscript {
@@ -45,47 +43,27 @@ public final class AgentTranscript {
 		}
 	}
 
-	/** 把持久化的对话记录重建为 DashScope SDK 消息列表。 */
-	public static List<Object> toSdkMessages(List<Entry> entries) {
-		List<Object> messages = new ArrayList<>();
+	/** 把持久化的对话记录重建为供应商无关的模型消息列表。 */
+	public static List<ChatMessage> toChatMessages(List<Entry> entries) {
+		List<ChatMessage> messages = new ArrayList<>();
 		for (Entry entry : entries) {
 			switch (entry.role()) {
-				case "user" -> messages.add(MultiModalMessage.builder().role("user")
-						.content(List.of(Map.of("text", entry.text() == null ? "" : entry.text()))).build());
+				case "user" -> messages.add(ChatMessage.user(entry.text() == null ? "" : entry.text()));
 				case "assistant" -> {
-					var builder = MultiModalMessage.builder().role("assistant");
-					/*
-					 * DashScope's next-turn serializer iterates assistant.content even
-					 * when the assistant turn contains only tool calls.  Persisted tool
-					 * turns therefore must be reconstructed with an empty text part;
-					 * omitting content causes an SDK-side NullPointerException on the
-					 * following reasoning step.
-					 */
-					builder.content(List.of(Map.of("text", entry.text() == null ? "" : entry.text())));
+					List<ToolCall> calls = new ArrayList<>();
 					if (!entry.toolCalls().isEmpty()) {
-						List<ToolCallBase> calls = new ArrayList<>();
-						for (ToolCallRecord record : entry.toolCalls()) calls.add(rebuildToolCall(record));
-						builder.toolCalls(calls);
+						for (ToolCallRecord record : entry.toolCalls()) {
+							calls.add(new ToolCall(record.id(), record.name(), record.argumentsJson()));
+						}
 					}
-					messages.add(builder.build());
+					messages.add(ChatMessage.assistant(entry.text() == null ? "" : entry.text(), calls));
 				}
-				case "tool" -> messages.add(MultiModalMessage.builder().role("tool")
-						.toolCallId(entry.toolCallId()).name(entry.name())
-						.content(List.of(Map.of("text", entry.text() == null ? "" : entry.text()))).build());
+				case "tool" -> messages.add(ChatMessage.tool(entry.toolCallId(), entry.name(),
+						entry.text() == null ? "" : entry.text()));
 				default -> throw new IllegalArgumentException("未知的对话记录角色：" + entry.role());
 			}
 		}
 		return messages;
-	}
-
-	private static ToolCallFunction rebuildToolCall(ToolCallRecord record) {
-		ToolCallFunction call = new ToolCallFunction();
-		call.setId(record.id());
-		ToolCallFunction.CallFunction function = call.new CallFunction();
-		function.setName(record.name());
-		function.setArguments(record.argumentsJson());
-		call.setFunction(function);
-		return call;
 	}
 
 	/**

@@ -28,7 +28,7 @@ public class AgentTaskRouter {
 	}
 
 	public AgentTaskType route(String command, List<ConversationTurn> history) {
-		String context = requestContext(command, history);
+		String context = requestContext(command, latestTurn(history));
 		return taskTypes.stream()
 				.filter(type -> !GenericTaskType.NAME.equals(type.name()))
 				.filter(type -> type.supports(context))
@@ -45,8 +45,13 @@ public class AgentTaskRouter {
 		if (explicitType.isPresent()) {
 			return explicitType.get().autoStart(currentRequest);
 		}
-		String context = requestContext(command, history);
+		String context = requestContext(command, latestTurn(history));
 		return taskTypes.stream().anyMatch(type -> type.supports(context) && type.autoStart(context));
+	}
+
+	private static List<ConversationTurn> latestTurn(List<ConversationTurn> history) {
+		if (history == null || history.isEmpty()) return List.of();
+		return List.of(history.get(history.size() - 1));
 	}
 
 	static String requestContext(String command, List<ConversationTurn> history) {

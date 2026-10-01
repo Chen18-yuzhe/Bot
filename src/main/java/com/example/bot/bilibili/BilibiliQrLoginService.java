@@ -1,6 +1,7 @@
 package com.example.bot.bilibili;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.Supplier;
@@ -20,9 +21,7 @@ public class BilibiliQrLoginService {
 	private final Executor executor;
 	private final int timeoutSeconds;
 
-	private State state = State.IDLE;
-	private String qrContent = "";
-	private String message = "尚未开始扫码登录";
+	private final ConcurrentHashMap<String, LoginAttempt> attempts = new ConcurrentHashMap<>();
 
 	@Autowired
 	public BilibiliQrLoginService(BilibiliFavoritesService favorites,
@@ -38,43 +37,51 @@ public class BilibiliQrLoginService {
 		this.executor = executor;
 	}
 
-	public synchronized LoginStatus start() {
-		if (state == State.WAITING_FOR_SCAN) return status();
-		if (favorites.authenticated()) {
-			state = State.AUTHENTICATED;
-			message = "Bilibili 已登录";
-			return status();
+	public synchronized LoginStatus start(String projectId) {
+		String project = credentialId(projectId);
+		LoginAttempt attempt = attempts.computeIfAbsent(project, ignored -> new LoginAttempt());
+		if (attempt.state == State.WAITING_FOR_SCAN) return status(project);
+		if (favorites.authenticated(project)) {
+			attempt.state = State.AUTHENTICATED;
+			attempt.message = "Bilibili 已登录";
+			return status(project);
 		}
 		try {
 			BiliQrLogin login = loginFactory.get();
 			JsonNode payload = login.getUrl();
-			qrContent = payload.path("data").path("url").asText("");
-			if (qrContent.isBlank()) throw new IllegalStateException("Bilibili 未返回二维码内容");
-			state = State.WAITING_FOR_SCAN;
-			message = "请使用 Bilibili App 扫码并确认登录";
+			attempt.qrContent = payload.path("data").path("url").asText("");
+			if (attempt.qrContent.isBlank()) throw new IllegalStateException("Bilibili 未返回二维码内容");
+			attempt.state = State.WAITING_FOR_SCAN;
+			attempt.message = "请使用 Bilibili App 扫码并确认登录";
 			CompletableFuture.supplyAsync(() -> poll(login, payload), executor)
-					.whenComplete(this::complete);
-			return status();
+					.whenComplete((cookie, error) -> complete(project, cookie, error));
+			return status(project);
 		} catch (Exception error) {
-			state = State.FAILED;
-			message = safeMessage(error);
-			throw new IllegalStateException("申请 Bilibili 登录二维码失败：" + message, error);
+			attempt.state = State.FAILED;
+			attempt.message = safeMessage(error);
+			throw new IllegalStateException("申请 Bilibili 登录二维码失败：" + attempt.message, error);
 		}
 	}
 
-	public synchronized LoginStatus status() {
-		if (favorites.authenticated() && state != State.WAITING_FOR_SCAN) {
-			state = State.AUTHENTICATED;
-			message = "Bilibili 已登录";
+	public synchronized LoginStatus status(String projectId) {
+		String project = credentialId(projectId);
+		LoginAttempt attempt = attempts.computeIfAbsent(project, ignored -> new LoginAttempt());
+		if (favorites.authenticated(project) && attempt.state != State.WAITING_FOR_SCAN) {
+			attempt.state = State.AUTHENTICATED;
+			attempt.message = "Bilibili 已登录";
 		}
-		return new LoginStatus(state, !qrContent.isBlank() && state == State.WAITING_FOR_SCAN, message);
+		return new LoginStatus(attempt.state,
+				!attempt.qrContent.isBlank() && attempt.state == State.WAITING_FOR_SCAN,
+				attempt.message);
 	}
 
-	public synchronized String qrContent() {
-		if (state != State.WAITING_FOR_SCAN || qrContent.isBlank()) {
+	public synchronized String qrContent(String projectId) {
+		String project = credentialId(projectId);
+		LoginAttempt attempt = attempts.get(project);
+		if (attempt == null || attempt.state != State.WAITING_FOR_SCAN || attempt.qrContent.isBlank()) {
 			throw new IllegalStateException("当前没有待扫描的 Bilibili 登录二维码");
 		}
-		return qrContent;
+		return attempt.qrContent;
 	}
 
 	private String poll(BiliQrLogin login, JsonNode payload) {
@@ -85,21 +92,26 @@ public class BilibiliQrLoginService {
 		}
 	}
 
-	private synchronized void complete(String cookie, Throwable error) {
-		qrContent = "";
+	private synchronized void complete(String projectId, String cookie, Throwable error) {
+		LoginAttempt attempt = attempts.computeIfAbsent(projectId, ignored -> new LoginAttempt());
+		attempt.qrContent = "";
 		if (error != null) {
-			state = State.FAILED;
-			message = safeMessage(error);
+			attempt.state = State.FAILED;
+			attempt.message = safeMessage(error);
 			return;
 		}
 		try {
-			favorites.useRuntimeCookie(cookie);
-			state = State.AUTHENTICATED;
-			message = "Bilibili 扫码登录成功；Cookie 仅保存在当前进程内存中";
+			favorites.useRuntimeCookie(projectId, cookie);
+			attempt.state = State.AUTHENTICATED;
+			attempt.message = "Bilibili 扫码登录成功；凭据仅属于当前机器人项目并保存在进程内存中";
 		} catch (RuntimeException validationError) {
-			state = State.FAILED;
-			message = safeMessage(validationError);
+			attempt.state = State.FAILED;
+			attempt.message = safeMessage(validationError);
 		}
+	}
+
+	private static String credentialId(String sessionId) {
+		return BilibiliFavoritesService.credentialId(sessionId);
 	}
 
 	private static String safeMessage(Throwable error) {
@@ -112,4 +124,10 @@ public class BilibiliQrLoginService {
 
 	public enum State { IDLE, WAITING_FOR_SCAN, AUTHENTICATED, FAILED }
 	public record LoginStatus(State state, boolean qrAvailable, String message) { }
+
+	private static final class LoginAttempt {
+		private State state = State.IDLE;
+		private String qrContent = "";
+		private String message = "尚未开始扫码登录";
+	}
 }

@@ -1,21 +1,19 @@
 package com.example.bot.chat;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
-import com.example.bot.ApplicationException;
+import com.example.bot.model.MockChatModel;
 
 class QwenServiceTests {
 
 	@Test
-	void shouldGiveClearMessageWhenApiKeyIsMissing() {
-		QwenService service = new QwenService("", "qwen3.7-plus", "");
+	void shouldReplyThroughMockModelWithoutApiKey() {
+		QwenService service = new QwenService(new MockChatModel());
 
-		ApplicationException exception = assertThrows(ApplicationException.class,
-				() -> service.chat("你好"));
+		String answer = service.chat("你好");
 
-		assertEquals("请先配置环境变量 DASHSCOPE_API_KEY", exception.getMessage());
+		assertTrue(answer.contains("你好"));
 	}
 }

@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 import com.example.bot.chat.ConversationMemory;
 import com.example.bot.chat.ConversationContextPolicy;
 import com.example.bot.chat.ConversationTurn;
+import com.example.bot.ilink.UserNameService;
 
 import jakarta.annotation.PreDestroy;
 
@@ -26,6 +27,7 @@ public class AgentModeHandler {
 	private final AgentLoopService agentLoop;
 	private final ConversationMemory conversationMemory;
 	private final AgentTaskRouter taskRouter;
+	private final UserNameService userProfiles;
 	private final Map<String, Mode> modes = new ConcurrentHashMap<>();
 	private final Map<String, String> originalGoals = new ConcurrentHashMap<>();
 	private final Map<String, Long> sessionVersions = new ConcurrentHashMap<>();
@@ -33,13 +35,20 @@ public class AgentModeHandler {
 	private final java.util.Set<String> watchingTasks = ConcurrentHashMap.newKeySet();
 	private final ExecutorService completionWatchers = Executors.newVirtualThreadPerTaskExecutor();
 	private volatile BiConsumer<String, String> completionNotifier;
+	private volatile BiConsumer<String, AgentTask> loginNotifier;
 
 	@Autowired
 	public AgentModeHandler(AgentLoopService agentLoop, ConversationMemory conversationMemory,
-			AgentTaskRouter taskRouter) {
+			AgentTaskRouter taskRouter, UserNameService userProfiles) {
 		this.agentLoop = agentLoop;
 		this.conversationMemory = conversationMemory;
 		this.taskRouter = taskRouter;
+		this.userProfiles = userProfiles;
+	}
+
+	AgentModeHandler(AgentLoopService agentLoop, ConversationMemory conversationMemory,
+			AgentTaskRouter taskRouter) {
+		this(agentLoop, conversationMemory, taskRouter, null);
 	}
 
 	AgentModeHandler(AgentLoopService agentLoop) {
@@ -71,7 +80,9 @@ public class AgentModeHandler {
 			beginNewRequest(normalizedSession);
 			return submitGoal(normalizedSession, inlineGoal);
 		}
-		if (modeOf(normalizedSession) == Mode.AGENT) {
+		// Login completion is a control message even when the original task was
+		// auto-started from normal chat mode.
+		if (modeOf(normalizedSession) == Mode.AGENT || hasWaitingTask(normalizedSession)) {
 			String controlReply = handleNaturalControl(normalizedSession, command);
 			if (controlReply != null) return controlReply;
 		}
@@ -83,7 +94,7 @@ public class AgentModeHandler {
 		// stays in chat mode; otherwise the general chat model can only describe a
 		// purchase path and never invokes the FlyAI lookup or entry guard.
 		List<ConversationTurn> currentHistory = conversationMemory == null ? List.of()
-				: ConversationContextPolicy.relevantHistory(
+				: ConversationContextPolicy.explicitFollowUpHistory(
 						command, conversationMemory.history(normalizedSession));
 		if (taskRouter.shouldAutoStart(command, currentHistory)) {
 			return submitGoal(normalizedSession, command);
@@ -94,16 +105,20 @@ public class AgentModeHandler {
 
 	private String submitGoal(String normalizedSession, String command) {
 		List<ConversationTurn> history = conversationMemory == null
-				? List.of() : ConversationContextPolicy.relevantHistory(
+				? List.of() : ConversationContextPolicy.explicitFollowUpHistory(
 						command, conversationMemory.history(normalizedSession));
 		String taskType = taskRouter.route(command, history).name();
 		String contextualGoal = contextualGoal(command, history, taskType);
+		if (userProfiles != null) {
+			String profile = userProfiles.modelContext(normalizedSession);
+			if (!profile.isBlank()) contextualGoal += "\n\n" + profile;
+		}
 		if (conversationMemory != null) conversationMemory.rememberIncoming(normalizedSession, command);
 		AgentTask task = agentLoop.submit(normalizedSession, taskType, contextualGoal, Duration.ZERO);
 		originalGoals.put(task.getId(), command);
 		taskVersions.put(task.getId(), sessionVersions.getOrDefault(normalizedSession, 0L));
 		watchCompletion(task);
-		return "⌁ 正在分析目标…";
+		return "任务已受理，可在控制台「Agent 任务」查看进度。";
 	}
 
 	private void beginNewRequest(String sessionId) {
@@ -156,21 +171,33 @@ public class AgentModeHandler {
 		this.completionNotifier = completionNotifier;
 	}
 
+	/** Registers a channel-specific prompt for a task paused on login. */
+	public void setLoginNotifier(BiConsumer<String, AgentTask> loginNotifier) {
+		this.loginNotifier = loginNotifier;
+	}
+
 	private void watchCompletion(AgentTask submitted) {
 		if (completionNotifier == null) return;
 		if (!watchingTasks.add(submitted.getId())) return;
 		completionWatchers.submit(() -> {
 			try {
+				boolean loginNotified = false;
 				Thread.sleep(1_500);
 				long deadline = Math.max(System.currentTimeMillis() + 1_000, submitted.getDeadlineAtMs() + 5_000);
-				boolean executionProgressSent = false;
-				boolean verificationProgressSent = false;
 				while (System.currentTimeMillis() < deadline) {
 					AgentTask current = agentLoop.get(submitted.getId());
 					if (!isCurrent(current)) {
 						originalGoals.remove(current.getId());
 						taskVersions.remove(current.getId());
 						return;
+					}
+					if (!loginNotified && current.getStatus() == AgentTaskStatus.WAITING_HUMAN
+							&& current.getPendingHuman() != null
+							&& current.getPendingHuman().kind() == HumanRequest.Kind.LOGIN
+							&& BilibiliFavoritesTaskType.NAME.equals(current.getTaskType())) {
+						BiConsumer<String, AgentTask> notifier = loginNotifier;
+						if (notifier != null) notifier.accept(current.getSessionId(), current);
+						loginNotified = true;
 					}
 					if (current.getStatus().isTerminal()) {
 						String result = completionMessage(current);
@@ -182,14 +209,6 @@ public class AgentModeHandler {
 						BiConsumer<String, String> notifier = completionNotifier;
 						if (notifier != null) notifier.accept(current.getSessionId(), result);
 						return;
-					}
-					BiConsumer<String, String> notifier = completionNotifier;
-					if (!executionProgressSent && current.getStepCount() > 0 && notifier != null) {
-						notifier.accept(current.getSessionId(), "⌁ 已确定执行路径，正在获取和核对信息…");
-						executionProgressSent = true;
-					} else if (!verificationProgressSent && current.getStepCount() > 1 && notifier != null) {
-						notifier.accept(current.getSessionId(), "⌁ 已获得阶段结果，正在检查是否完整…");
-						verificationProgressSent = true;
 					}
 					Thread.sleep(750);
 				}
@@ -231,6 +250,15 @@ public class AgentModeHandler {
 			watchCompletion(resumed);
 			return "⌁ 正在从已保存的进度继续…";
 		}
+		if (matches(command, "已扫码", "扫码完成", "我已扫码")) {
+			AgentTask task = latest(sessionId, true);
+			if (task == null || task.getStatus() != AgentTaskStatus.WAITING_HUMAN
+					|| !BilibiliFavoritesTaskType.NAME.equals(task.getTaskType())) return null;
+			AgentTask resumed = agentLoop.resume(task.getId());
+			taskVersions.put(resumed.getId(), sessionVersions.getOrDefault(sessionId, 0L));
+			watchCompletion(resumed);
+			return "已收到扫码完成通知，正在验证 Bilibili 登录并继续读取收藏夹。";
+		}
 		if (matches(command, "任务进度", "查看任务", "现在做到哪了")) {
 			AgentTask task = latestAny(sessionId);
 			if (task == null) return "当前没有 Agent 任务。";
@@ -244,7 +272,7 @@ public class AgentModeHandler {
 		return matches(command, "停", "暂停", "停止", "停一下", "先停", "先暂停", "别执行了", "先别做了",
 				"停止任务", "暂停任务", "先停一下", "暂停一下",
 				"继续", "恢复", "接着做", "恢复任务", "继续任务", "继续执行",
-				"任务进度", "查看任务", "现在做到哪了");
+				"任务进度", "查看任务", "现在做到哪了", "已扫码", "扫码完成", "我已扫码");
 	}
 
 	private AgentTask latest(String sessionId, boolean resumable) {
@@ -257,6 +285,11 @@ public class AgentModeHandler {
 
 	private AgentTask latestAny(String sessionId) {
 		return agentLoop.list(sessionId).stream().findFirst().orElse(null);
+	}
+
+	private boolean hasWaitingTask(String sessionId) {
+		return agentLoop.list(sessionId).stream()
+				.anyMatch(task -> task.getStatus() == AgentTaskStatus.WAITING_HUMAN);
 	}
 
 	private static boolean matches(String value, String... commands) {

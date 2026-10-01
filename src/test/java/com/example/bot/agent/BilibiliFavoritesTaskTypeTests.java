@@ -14,7 +14,7 @@ class BilibiliFavoritesTaskTypeTests {
 		assertThat(type.supports("列出我的B站收藏夹")).isTrue();
 		assertThat(type.supports("查询普通收藏夹")).isFalse();
 		assertThat(type.allowedTools()).containsExactly("manage_bilibili_favorites");
-		assertThat(type.autoStart("列出我的B站收藏夹")).isFalse();
+		assertThat(type.autoStart("列出我的B站收藏夹")).isTrue();
 	}
 
 	@Test
